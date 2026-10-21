@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>佛典研究工作台</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<aside><div class="brand">典<span>佛典研究工作台</span></div><p class="muted">BUDDHIST TEXT LAB · 0.1</p><nav>
+<button data-view="library" class="active">01　典籍与检索</button><button data-view="compare">02　原文对照</button><button data-view="research">03　分析工作区</button><button data-view="notes">04　研究笔记</button></nav>
+<div class="aside-foot">依据原文，保留疑问。<br>本机保存 · 不自动上传典籍</div></aside>
+<main><header><span class="eyebrow">文本 · 语境 · 论证</span><h1 id="view-title">典籍与检索</h1><p class="muted">从可核查的原文出发，建立自己的研究记录。</p></header>
+<div id="status" role="status" aria-live="polite"></div>
+<section id="library" class="view">
+<div class="stats"><div><strong id="book-count">0</strong>部典籍</div><div><strong id="passage-count">0</strong>段原文</div><div><strong id="note-count">0</strong>条笔记</div></div>
+<details class="panel"><summary>＋ 导入典籍</summary><form id="import-form"><div class="grid"><label>典籍名称<input name="title" required placeholder="如：金刚般若波罗蜜经"></label><label>译者 / 作者<input name="author" placeholder="按所用版本填写"></label><label>版本 / 来源<input name="edition" placeholder="出版信息、藏经编号或来源链接"></label><label>文件（上限 25 MB）<input name="file" type="file" accept=".pdf,.txt,.md" required></label></div><p class="muted">支持可提取文字的 PDF，以及 UTF-8 / GB18030 文本。PDF 页码指文件物理页，不是书页印刷页码。扫描件需先 OCR。</p><button class="primary" type="submit">导入并建立段落索引</button></form></details>
+<div class="panel"><div class="toolbar"><label>典籍<select id="book-filter"><option value="">全部典籍</option></select></label><label class="grow">查找原文<input id="query" placeholder="输入原词或完整句子，按字面检索"></label><button id="search" class="primary">检索</button></div><div id="book-list"></div><p id="result-count" class="muted"></p><div id="results"></div><div class="toolbar"><button id="previous">上一页</button><button id="next">下一页</button></div></div>
+</section>
+<section id="compare" class="view" hidden><p class="muted">在检索结果中点击“加入对照”，最多选择两段。并列展示用于核查表述，不自动判定同义或矛盾。</p><div id="comparison" class="grid"></div></section>
+<section id="research" class="view" hidden><div class="panel"><h2>基于证据的分析</h2><p>在原文检索结果中选取材料，建立可追溯的分析任务。</p><div id="selected"></div><label>研究问题<textarea id="question" rows="3" placeholder="例如：两段关于“无我”的表述，其前提与适用范围有什么差异？"></textarea></label><div class="toolbar"><button id="make-prompt" class="primary">生成研究提示词</button><button id="clear-selection">清空选材</button></div><p class="muted">本版尚未连接 AI 模型。以下内容是提示词，不是已完成的分析；可复制到你使用的 AI 工具。复制前请核查所选材料与来源。</p><textarea id="prompt" rows="16" readonly aria-label="研究提示词"></textarea><button id="download-prompt">下载提示词</button></div>
+<div class="panel"><h2>记录解释与判断</h2><form id="note-form"><label>关联原文<select id="note-passage" required></select></label><label>记录类型<select id="note-kind"><option>个人笔记</option><option>注疏解释</option><option>AI 推断</option><option>待核查</option></select></label><label>内容<textarea id="note-body" rows="7" required placeholder="区分引文与推断；记录论证、反驳、置信度和待核查出处。注疏解释请注明作者、版本与位置。"></textarea></label><button class="primary" type="submit">保存研究记录</button></form></div></section>
+<section id="notes" class="view" hidden><div class="toolbar"><button id="export-notes" class="primary">导出 Markdown 笔记</button><button id="export-data">导出 JSON 数据</button></div><p class="muted">JSON 导出包括典籍元数据、提取后的全部原文与笔记；原 PDF 文件未保存。恢复时请备份 data 文件夹中的数据库，本版不提供 JSON 回导。</p><div id="notes-list"></div></section>
+</main></body></html>

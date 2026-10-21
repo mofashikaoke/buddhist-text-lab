@@ -1,0 +1,2 @@
+# Only needed for PDF import. TXT/Markdown features use the Python standard library.
+pypdf>=5,<7
