@@ -24,6 +24,11 @@ class Library:
           id INTEGER PRIMARY KEY, passage_id INTEGER NOT NULL REFERENCES passages(id),
           kind TEXT NOT NULL, body TEXT NOT NULL,
           created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+        CREATE TABLE IF NOT EXISTS analyses (
+          id INTEGER PRIMARY KEY, question TEXT NOT NULL, evidence TEXT NOT NULL,
+          model TEXT NOT NULL, endpoint TEXT NOT NULL, body TEXT NOT NULL,
+          warnings TEXT NOT NULL, usage TEXT NOT NULL,
+          created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
         ''')
 
     def close(self):
@@ -125,9 +130,24 @@ class Library:
              JOIN books b ON b.id=p.book_id ORDER BY n.id DESC''')]
 
     def backup(self):
-        return {'schema_version': 1, 'books': self.books(),
+        return {'schema_version': 2, 'books': self.books(),
                 'passages': [dict(r) for r in self.db.execute('SELECT * FROM passages ORDER BY id')],
-                'notes': self.notes()}
+                'notes': self.notes(), 'analyses': self.analyses()}
+
+    def save_analysis(self, question, passages, model, endpoint, result, warnings):
+        with self.db:
+            cur = self.db.execute('''INSERT INTO analyses(question,evidence,model,endpoint,body,warnings,usage)
+                       VALUES(?,?,?,?,?,?,?)''', (question, json.dumps(passages, ensure_ascii=False),
+                       model, endpoint, result['text'], json.dumps(warnings, ensure_ascii=False),
+                       json.dumps(result.get('usage', {}))))
+        return cur.lastrowid
+
+    def analyses(self):
+        rows = [dict(r) for r in self.db.execute('SELECT * FROM analyses ORDER BY id DESC')]
+        for row in rows:
+            for key in ('evidence', 'warnings', 'usage'):
+                row[key] = json.loads(row[key])
+        return rows
 
 
 def citation(p):
@@ -165,4 +185,16 @@ def notes_markdown(notes):
     for n in notes:
         parts += [f"\n## {n['kind']} · {n['created']}", citation(n),
                   '\n### 关联原文\n', n['text'], '\n### 研究记录\n', n['body']]
+    return '\n\n'.join(parts) + '\n'
+
+
+def analyses_markdown(rows):
+    parts = ['\n# AI 分析记录（推断，未经人工认证）']
+    for a in rows:
+        parts += [f"\n## 分析 {a['id']} · {a['created']}",
+                  f"模型：{a['model']}；接口：{a['endpoint']}",
+                  '研究问题：' + a['question'], a['body'], '\n'.join(a['warnings']),
+                  '\n### 本次选用的原文快照']
+        for p in a['evidence']:
+            parts += [citation(p), p['text']]
     return '\n\n'.join(parts) + '\n'

@@ -1,0 +1,52 @@
+name: Build Windows EXE
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Test research and AI functions
+        run: python -m unittest -v
+      - name: Build standalone executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name BuddhistTextLab --add-data "web:web" --collect-all pypdf desktop.py
+      - name: Smoke test packaged executable
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist/BuddhistTextLab.exe -ArgumentList '--smoke-test', 'smoke-result.txt' -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); throw 'Executable smoke test timed out' }
+          if ($p.ExitCode -ne 0 -or -not (Test-Path smoke-result.txt)) { throw 'Executable smoke test failed' }
+          Get-Content smoke-result.txt
+      - name: Create download package and checksum
+        shell: pwsh
+        run: |
+          Copy-Item WINDOWS.md dist/README-Windows.md
+          $hash = (Get-FileHash dist/BuddhistTextLab.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  BuddhistTextLab.exe" | Out-File dist/SHA256SUMS.txt -Encoding ascii
+          Compress-Archive -Path dist/BuddhistTextLab.exe,dist/README-Windows.md,dist/SHA256SUMS.txt -DestinationPath BuddhistTextLab-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BuddhistTextLab-Windows-x64
+          path: |
+            dist/BuddhistTextLab.exe
+            dist/SHA256SUMS.txt
+            dist/README-Windows.md
+          retention-days: 90
+      - name: Publish private repository release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v0.2.${{ github.run_number }}"
+          gh release create $tag dist/BuddhistTextLab.exe BuddhistTextLab-Windows-x64.zip dist/SHA256SUMS.txt --target '${{ github.sha }}' --title "佛典研究工作台 $tag · Windows x64" --notes-file WINDOWS.md

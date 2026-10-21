@@ -9,7 +9,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from core import Library, notes_markdown, research_prompt
+from core import Library, notes_markdown, analyses_markdown, research_prompt
+from ai import Settings, complete, citation_warnings
 
 ROOT = Path(__file__).parent
 TOKEN = secrets.token_urlsafe(32)
@@ -53,8 +54,12 @@ class Handler(BaseHTTPRequestHandler):
                                     100, max(0, int(q.get('offset', ['0'])[0])))
             elif route.path == '/api/notes':
                 data = lib.notes()
+            elif route.path == '/api/analyses':
+                data = lib.analyses()
+            elif route.path == '/api/settings':
+                data = self.server.ai_settings.public()
             elif route.path == '/api/export':
-                data = {'markdown': notes_markdown(lib.notes()), 'backup': lib.backup()}
+                data = {'markdown': notes_markdown(lib.notes()) + analyses_markdown(lib.analyses()), 'backup': lib.backup()}
             else:
                 return self.respond(404, {'error': '页面不存在。'})
             self.respond(200, data)
@@ -84,11 +89,30 @@ class Handler(BaseHTTPRequestHandler):
                 elif self.path == '/api/notes':
                     lib.add_note(data['passage_id'], data['kind'], data['body'])
                     result = {'saved': True}
-                elif self.path == '/api/prompt':
+                elif self.path == '/api/settings':
+                    result = self.server.ai_settings.save(data)
+                elif self.path == '/api/ai-test':
+                    config = self.server.ai_settings.snapshot()
+                    complete(config, '连接测试。请只回答：连接成功。')
+                    result = {'message': '连接成功，模型已返回正文。'}
+                elif self.path in ('/api/prompt', '/api/analyze'):
                     ids = list(dict.fromkeys(data['ids']))
                     if not 1 <= len(ids) <= 20:
                         raise ValueError('一次选择 1—20 段原文。')
-                    result = {'prompt': research_prompt([lib.passage(i) for i in ids], data.get('question', ''))}
+                    passages = [lib.passage(i) for i in ids]
+                    question = str(data.get('question', ''))
+                    prompt = research_prompt(passages, question)
+                    if self.path == '/api/prompt':
+                        result = {'prompt': prompt}
+                    else:
+                        config = self.server.ai_settings.snapshot()
+                        result = complete(config, prompt)
+                        warnings = citation_warnings(result['text'], passages)
+                        if result['finish_reason'] == 'length':
+                            warnings.insert(0, '模型输出因 token 上限而截断；本条分析不完整。')
+                        result['id'] = lib.save_analysis(question, passages, config['model'],
+                                                         config['base_url'], result, warnings)
+                        result['warnings'] = warnings
                 else:
                     return self.respond(404, {'error': '操作不存在。'})
                 self.respond(200, result)
@@ -107,9 +131,7 @@ def main():
     parser.add_argument('--port', type=int, default=8787)
     parser.add_argument('--data', default=os.environ.get('BUDDHIST_LAB_DATA', str(ROOT / 'data' / 'research.sqlite3')))
     args = parser.parse_args()
-    Library(args.data).close()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
-    server.db_path = args.data
+    server = create_server(args.data, args.port)
     print(f'佛典研究工作台：http://127.0.0.1:{args.port} （Ctrl+C 退出）', flush=True)
     try:
         server.serve_forever()
@@ -117,6 +139,14 @@ def main():
         pass
     finally:
         server.server_close()
+
+
+def create_server(db_path, port=0):
+    Library(db_path).close()
+    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    server.db_path = db_path
+    server.ai_settings = Settings(Path(db_path).parent / 'ai-settings.json')
+    return server
 
 
 if __name__ == '__main__':
