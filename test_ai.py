@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from ai import Settings, citation_warnings, complete, protect_key, validate_url
@@ -22,6 +23,9 @@ class MockModel(BaseHTTPRequestHandler):
             self.send_response(401)
             self.end_headers()
             self.wfile.write(b'private secret key must not be echoed')
+            return
+        if self.path == '/reset/chat/completions':
+            self.connection.close()  # drop the connection without any HTTP response
             return
         if self.path == '/redirect/chat/completions':
             self.send_response(302)
@@ -65,6 +69,34 @@ class AITests(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 complete({**self.config, 'base_url': self.base + path}, 'test')
             self.assertNotIn('private secret', str(cm.exception))
+
+    def test_dropped_connection_becomes_value_error(self):
+        with self.assertRaises(ValueError):
+            complete({**self.config, 'base_url': self.base + '/reset'}, 'test')
+
+    def test_failed_first_chat_leaves_no_empty_conversation(self):
+        db = str(Path(self.tmp.name) / 'fail.sqlite3')
+        lib = Library(db)
+        lib.import_book('test.txt', '选中原文'.encode(), '测试典籍')
+        lib.close()
+        app = create_server(db)
+        app.ai_settings.save({**self.config, 'base_url': self.base + '/unauthorized'})
+        thread = threading.Thread(target=app.serve_forever, daemon=True)
+        thread.start()
+        try:
+            req = Request(f'http://127.0.0.1:{app.server_port}/api/chat',
+                          json.dumps({'ids': [1], 'message': '问'}).encode(),
+                          headers={'X-Research-Token': TOKEN, 'Content-Type': 'application/json'})
+            with self.assertRaises(HTTPError) as cm:
+                urlopen(req)
+            self.assertEqual(cm.exception.code, 400)
+            lib = Library(db)
+            self.assertEqual(lib.list_conversations(), [])
+            lib.close()
+        finally:
+            app.shutdown()
+            app.server_close()
+            thread.join()
 
     def test_settings_do_not_write_plaintext_and_destination_change_clears_key(self):
         path = Path(self.tmp.name) / 'ai-settings.json'

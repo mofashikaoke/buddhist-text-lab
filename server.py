@@ -5,6 +5,7 @@ import binascii
 import json
 import os
 import secrets
+import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -120,6 +121,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('请输入问题。')
                     config = self.server.ai_settings.snapshot()
                     cid = data.get('conversation_id')
+                    is_new = not cid
                     if cid:
                         conv = lib.get_conversation(int(cid))
                         passages = conv['conversation']['context']
@@ -133,7 +135,12 @@ class Handler(BaseHTTPRequestHandler):
                         conv = lib.get_conversation(cid)
                         passages = conv['conversation']['context']
                         history = []
-                    result = complete_messages(config, chat_messages(passages, history, message))
+                    try:
+                        result = complete_messages(config, chat_messages(passages, history, message))
+                    except Exception:
+                        if is_new:
+                            lib.delete_conversation(cid)  # do not leave an empty conversation behind
+                        raise
                     warnings = citation_warnings(result['text'], passages)
                     if result['finish_reason'] == 'length':
                         warnings.insert(0, '模型输出因 token 上限而截断；本条回答不完整。')
@@ -172,6 +179,8 @@ class Handler(BaseHTTPRequestHandler):
                 lib.close()
         except (ValueError, KeyError, TypeError, binascii.Error) as exc:
             self.respond(400, {'error': str(exc)})
+        except (sqlite3.Error, OSError):
+            self.respond(500, {'error': '本地数据库或文件操作失败，请重试。'})
 
     def log_message(self, fmt, *args):
         # Do not log search queries or uploaded text.

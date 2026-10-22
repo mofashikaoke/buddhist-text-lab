@@ -2,10 +2,10 @@
 import base64
 import ctypes
 from ctypes import wintypes
+import http.client
 import json
 import os
 import re
-import socket
 import ssl
 import threading
 from pathlib import Path
@@ -155,7 +155,8 @@ def complete_messages(config, messages):
                     404: '接口地址或模型不存在。', 429: '额度不足或请求过于频繁。',
                     400: '接口参数不兼容，请核对模型名和输出 token 参数。'}
         raise ValueError(messages.get(exc.code, f'AI 服务返回 HTTP {exc.code}。')) from None
-    except (error.URLError, TimeoutError, socket.timeout):
+    except (OSError, http.client.HTTPException):
+        # Covers URLError, timeouts, connection resets and SSL errors raised while reading.
         raise ValueError('无法连接 AI 服务或请求超时，请检查网络及接口地址。') from None
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ValueError('接口未返回有效的 JSON。') from None
