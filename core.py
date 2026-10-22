@@ -8,6 +8,28 @@ from pathlib import Path
 
 SCHEMA_VERSION = 3
 MAX_CONTEXT_PASSAGES = 20
+MAX_PARAGRAPH = 1500
+
+
+def split_paragraphs(text):
+    """Split on blank lines; an oversized block is split further at line breaks, then at sentence ends."""
+    for block in re.split(r'\n\s*\n', text.replace('\r\n', '\n')):
+        block = block.strip()
+        if len(block) <= MAX_PARAGRAPH:
+            if block:
+                yield block
+            continue
+        pieces = [ln.strip() for ln in block.split('\n') if ln.strip()]
+        if len(pieces) == 1:
+            pieces = [s for s in re.findall(r'[^。！？!?；;]*[。！？!?；;]?', block) if s.strip()]
+        current = ''
+        for piece in pieces:
+            if current and len(current) + len(piece) > MAX_PARAGRAPH:
+                yield current
+                current = ''
+            current += ('\n' if current and '\n' in block else '') + piece
+        if current:
+            yield current
 
 
 class Library:
@@ -41,6 +63,9 @@ class Library:
             REFERENCES conversations(id) ON DELETE CASCADE,
           role TEXT NOT NULL, body TEXT NOT NULL, warnings TEXT NOT NULL DEFAULT '[]',
           created TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+        CREATE INDEX IF NOT EXISTS idx_passages_book ON passages(book_id, ordinal);
+        CREATE INDEX IF NOT EXISTS idx_notes_passage ON notes(passage_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
         ''')
 
     def close(self):
@@ -89,9 +114,7 @@ class Library:
         chunks = []
         for page, text in pages:
             # Keep original punctuation and text inside each paragraph; never silently truncate.
-            for paragraph in re.split(r'\n\s*\n', text.replace('\r\n', '\n')):
-                if paragraph.strip():
-                    chunks.append((page, paragraph.strip()))
+            chunks.extend((page, paragraph) for paragraph in split_paragraphs(text))
         if not chunks:
             raise ValueError('没有提取到文字。扫描版 PDF 需要先做 OCR。')
         with self.db:
@@ -122,10 +145,11 @@ class Library:
         if book_id:
             clauses.append('p.book_id=?')
             params.append(int(book_id))
-        if query:
+        for term in query.split():
             # instr implements literal matching, including %, _, and quotation marks.
+            # Whitespace-separated terms must all appear in the same passage.
             clauses.append('instr(p.text,?)>0')
-            params.append(query)
+            params.append(term)
         where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
         sql = '''SELECT p.*,b.title,b.author,b.edition FROM passages p
                  JOIN books b ON b.id=p.book_id''' + where

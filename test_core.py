@@ -30,6 +30,31 @@ class ResearchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.lib.import_book('copy.txt', text.encode(), '副本')
 
+    def test_multi_term_search_requires_all_terms(self):
+        self.lib.import_book('t.txt', '如是我闻。\n\n无我无常。\n\n如是无常。'.encode(), '测试')
+        self.assertEqual(self.lib.passages(query='如是 无常')['total'], 1)
+        self.assertEqual(self.lib.passages(query='  无常  ')['total'], 2)
+        self.assertEqual(self.lib.passages(query='无我 如是')['total'], 0)
+        self.assertEqual(self.lib.passages(query='   ')['total'], 3)
+
+    def test_oversized_block_is_split_without_losing_text(self):
+        lines = [f'第{i}行' + '文' * 200 + '。' for i in range(20)]
+        self.lib.import_book('lines.txt', '\n'.join(lines).encode(), '分行文本')
+        items = self.lib.passages()['items']
+        self.assertGreater(len(items), 1)
+        self.assertTrue(all(len(p['text']) <= 1500 for p in items))
+        self.assertEqual('\n'.join(p['text'] for p in items), '\n'.join(lines))
+        sentences = ''.join(f'句{i}' + '文' * 100 + '。' for i in range(40))
+        self.lib.import_book('one.txt', sentences.encode(), '单行文本')
+        pieces = [p['text'] for p in self.lib.passages(book_id=self.lib.books()[0]['id'])['items']]
+        self.assertGreater(len(pieces), 1)
+        self.assertEqual(''.join(pieces), sentences)
+        self.assertTrue(all(len(t) <= 1500 for t in pieces))
+
+    def test_short_single_newline_block_stays_one_passage(self):
+        self.lib.import_book('s.txt', '如实保留\n原文。'.encode(), '短文')
+        self.assertEqual([p['text'] for p in self.lib.passages()['items']], ['如实保留\n原文。'])
+
     def test_notes_persist_and_reference_original(self):
         self.lib.import_book('test.md', '测试原文'.encode(), '测试典籍')
         p = self.lib.passages()['items'][0]

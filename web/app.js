@@ -36,12 +36,12 @@ async function search(reset = true) {
   if (reset) offset = 0;
   const q = new URLSearchParams({ book: $('book-filter').value, q: $('query').value, offset: String(offset) });
   const result = await api('passages?' + q); total = result.total; lastResults = result.items;
-  $('result-count').textContent = `共 ${total} 段${total ? ' · 当前 ' + (offset + 1) + '—' + (offset + result.items.length) : ''}。按文件顺序排列；不做语义扩展或繁简转换。`;
+  $('result-count').textContent = `共 ${total} 段${total ? ' · 当前 ' + (offset + 1) + '—' + (offset + result.items.length) : ''}。按文件顺序排列；多个关键词用空格分隔，须同时出现；不做语义扩展或繁简转换。`;
   $('results').replaceChildren();
   if (!result.items.length) $('results').append(el('p', '没有匹配的原文。', 'empty'));
   result.items.forEach(p => {
     const card = el('article', undefined, 'passage');
-    card.append(el('div', cite(p), 'citation'), el('p', p.text, 'excerpt'));
+    card.append(el('div', cite(p), 'citation'), highlight(p.text, $('query').value));
     const actions = el('div', undefined, 'toolbar');
     actions.append(
       button('查看全文', () => showSource(p)),
@@ -52,6 +52,15 @@ async function search(reset = true) {
   });
   $('previous').disabled = offset === 0; $('next').disabled = offset + 100 >= total;
   refreshNotePassages();
+}
+function highlight(text, query) {
+  const p = el('p', undefined, 'excerpt'), terms = [...new Set(query.split(/\s+/).filter(Boolean))].sort((a, b) => b.length - a.length);
+  if (!terms.length) { p.textContent = text; return p; }
+  const pattern = new RegExp(terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  let start = 0;
+  for (const m of text.matchAll(pattern)) { p.append(text.slice(start, m.index), el('mark', m[0])); start = m.index + m[0].length; }
+  p.append(text.slice(start));
+  return p;
 }
 function addContext(p, silent) {
   if (context.size >= 20 && !context.has(p.id)) throw new Error('依据原文最多 20 段。');
