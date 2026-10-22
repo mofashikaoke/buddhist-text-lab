@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from core import Library, notes_markdown, analyses_markdown, research_prompt, chat_messages, conversations_markdown
+from notebooks import Notebooks
 from ai import Settings, complete, complete_messages, citation_warnings
 
 ROOT = Path(__file__).parent
@@ -44,10 +45,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(200, (ROOT / 'web' / name).read_bytes(), mime)
         if route.path == '/api/session':
             return self.respond(200, {'token': TOKEN})
-        lib = Library(self.server.db_path)
+        if route.path == '/api/notebooks':
+            return self.respond(200, self.server.notebooks.list())
+        lib = None
         try:
+            lib = Library(self.server.notebooks.path(self.headers.get('X-Notebook-ID', 'default'))
+                          if hasattr(self.server, 'notebooks') else self.server.db_path)
             q = parse_qs(route.query)
-            if route.path == '/api/books':
+            if route.path == '/api/notebooks':
+                data = self.server.notebooks.list()
+            elif route.path == '/api/books':
                 data = lib.books()
             elif route.path == '/api/passages':
                 data = lib.passages(q.get('book', [None])[0], q.get('q', [''])[0],
@@ -72,7 +79,8 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError) as exc:
             self.respond(400, {'error': str(exc)})
         finally:
-            lib.close()
+            if lib:
+                lib.close()
 
     def do_POST(self):
         if not self.trusted_host() or self.headers.get('X-Research-Token') != TOKEN:
@@ -84,9 +92,12 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict):
                 raise ValueError('请求格式无效。')
-            lib = Library(self.server.db_path)
+            lib = Library(self.server.notebooks.path(self.headers.get('X-Notebook-ID', 'default'))
+                          if hasattr(self.server, 'notebooks') else self.server.db_path)
             try:
-                if self.path == '/api/import':
+                if self.path == '/api/notebook-create':
+                    result = self.server.notebooks.create(data.get('name', ''))
+                elif self.path == '/api/import':
                     raw = base64.b64decode(data['data'], validate=True)
                     if len(raw) > 25 * 1024 * 1024:
                         raise ValueError('文件上限 25 MB。')
@@ -186,6 +197,7 @@ def create_server(db_path, port=0):
     Library(db_path).close()
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.db_path = db_path
+    server.notebooks = Notebooks(db_path)
     server.ai_settings = Settings(Path(db_path).parent / 'ai-settings.json')
     return server
 

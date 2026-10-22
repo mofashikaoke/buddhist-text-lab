@@ -1,16 +1,16 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>佛典研究工作台</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body>
-<header id="topbar"><div class="brand">典<span>佛典研究工作台</span></div><p class="muted ver">BUDDHIST TEXT LAB · 0.3</p>
-<div class="top-actions"><button id="btn-import">＋ 导入典籍</button><button id="btn-export-md">导出笔记</button><button id="btn-export-json">导出数据</button><button id="btn-settings">⚙ 设置</button></div></header>
+<header id="topbar"><div class="brand">典<span>佛典研究工作台</span></div><p class="muted ver">BUDDHIST TEXT LAB · DESKTOP 0.4</p>
+<div class="notebooks"><select id="notebook-select" aria-label="选择研究本"></select><button id="new-notebook" title="创建独立研究本">＋ 新建研究本</button></div><div class="top-actions"><button id="btn-import">＋ 导入典籍</button><button id="btn-export-md">导出笔记</button><button id="btn-export-json">导出数据</button><button id="btn-settings">⚙ 设置</button></div></header>
 <div id="status" role="status" aria-live="polite"></div>
 <div id="layout">
-<aside id="sources"><div class="pane-head"><h2>来源</h2><span id="book-count" class="muted"></span></div>
+<aside id="sources"><div class="pane-head"><h2>资料来源</h2><span id="book-count" class="muted"></span></div>
 <label class="grow">典籍<select id="book-filter"><option value="">全部典籍</option></select></label>
 <label class="grow">字面检索<input id="query" placeholder="输入原词或完整句子"></label>
 <div class="toolbar"><button id="search" class="primary">检索</button><button id="previous">‹</button><button id="next">›</button></div>
 <div id="book-list"></div><p id="result-count" class="muted"></p><div id="results"></div></aside>
-<main id="chat-pane"><div class="pane-head"><h2>对话</h2>
+<main id="chat-pane"><div class="pane-head"><h2>研究对话</h2>
 <select id="conv-select" aria-label="选择对话"><option value="">＋ 新对话</option></select>
 <button id="conv-delete" title="删除当前对话">🗑</button></div>
 <div id="context-bar"><span class="muted">依据原文（<span id="context-count">0</span>/20）：</span><div id="context-chips"></div></div>
@@ -18,8 +18,8 @@
 <div id="suggestions"></div>
 <div id="composer"><textarea id="chat-input" rows="2" placeholder="基于左侧选定的原文提问…"></textarea>
 <div class="toolbar"><button id="send-chat" class="primary">发送</button><button id="btn-analyze" title="对当前依据原文做一次结构化深度分析">结构化分析</button></div></div>
-<p class="muted fine">回答只依据所选原文并标注 P编号；引用检查不等于结论已验证。Enter 发送，Shift+Enter 换行。</p></main>
-<aside id="studio"><div class="tabs"><button data-tab="compare" class="active">对照</button><button data-tab="notes">笔记</button><button data-tab="analyses">分析</button></div>
+<p id="ai-destination" class="muted fine"></p><p class="muted fine">回答只依据所选原文并标注 P编号；引用检查不等于结论已验证。Enter 发送，Shift+Enter 换行。</p></main>
+<aside id="studio"><div class="tabs"><button data-tab="compare" class="active">原文对照</button><button data-tab="notes">笔记</button><button data-tab="analyses">分析</button></div>
 <section id="tab-compare"><p class="muted">在来源中点“对照”加入，最多两段。</p><div id="comparison"></div></section>
 <section id="tab-notes" hidden><form id="note-form"><label>关联原文<select id="note-passage" required></select></label>
 <label>类型<select id="note-kind"><option>个人笔记</option><option>注疏解释</option><option>AI 推断</option><option>待核查</option></select></label>
@@ -38,7 +38,7 @@
 <p class="muted">支持可提取文字的 PDF，以及 UTF-8 / GB18030 文本。PDF 页码指文件物理页，不是印刷页码。扫描件需先 OCR。</p>
 <button class="primary" type="submit">导入并建立段落索引</button></form></dialog>
 <dialog id="settings-dialog"><form method="dialog"><button class="x" aria-label="关闭">✕</button></form>
-<h2>AI 接口设置</h2><p class="muted">支持 OpenAI 及兼容 Chat Completions 协议的接口。</p>
+<h2>AI 接口设置</h2><button id="open-data" type="button">打开数据文件夹</button><p class="muted">支持 OpenAI 及兼容 Chat Completions 协议的接口。</p>
 <form id="settings-form"><label>API 基础地址<input id="api-base" type="url" required placeholder="https://api.openai.com/v1"></label>
 <label>模型名称<input id="api-model" required placeholder="填写账号可用的模型 ID"></label>
 <label>API Key<input id="api-key" type="password" autocomplete="off" placeholder="留空保留当前密钥；更换接口地址时需重新填写"></label>
@@ -47,5 +47,5 @@
 <label class="check"><input id="remember-key" type="checkbox"> 在此 Windows 账号下加密保存密钥</label><p id="key-status" class="muted"></p>
 <div class="toolbar"><button type="submit" class="primary">保存设置</button><button type="button" id="test-ai">测试连接</button><button type="button" id="forget-key">清除密钥</button></div></form>
 <p class="muted">未勾选保存时，密钥仅保留到程序退出。这里填写 API Key，不填写网页账号密码。更换接口地址后，已有密钥不会自动发送给新地址。</p></dialog>
-<div class="aside-foot">依据原文，保留疑问。<br>本机保存 · 按需调用 AI</div>
+<dialog id="source-dialog"><form method="dialog"><button class="x" aria-label="关闭原文">✕</button></form><h2>原文与出处</h2><p id="source-citation" class="citation"></p><div id="source-body" class="source full-source"></div></dialog><dialog id="notebook-dialog"><form method="dialog"><button class="x" aria-label="关闭研究本窗口">✕</button></form><h2>新建研究本</h2><p class="muted">为一个主题建立独立的资料、对话与笔记空间。</p><form id="notebook-form"><label>名称<input id="notebook-name" required maxlength="60" placeholder="例如：般若思想研究"></label><button class="primary" type="submit">创建研究本</button></form></dialog><div class="aside-foot">依据原文，保留疑问。<br>本机保存 · 按需调用 AI</div>
 </body></html>

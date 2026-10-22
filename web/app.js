@@ -2,11 +2,11 @@
 const $ = id => document.getElementById(id);
 let token = '', offset = 0, total = 0, aiConfig = {}, aiBusy = false, chatBusy = false;
 const context = new Map(), comparison = new Map();
-let currentConv = null, editingNote = null, lastResults = [];
+let currentConv = null, editingNote = null, lastResults = [], notebookId = localStorage.getItem('notebook') || 'default';
 function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
 function status(message, error = false) { $('status').textContent = message; $('status').className = error ? 'error' : ''; }
 async function api(path, data) {
-  const response = await fetch('/api/' + path, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Research-Token': token }, body: JSON.stringify(data) });
+  const response = await fetch('/api/' + path, { method: data === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'X-Research-Token': token, 'X-Notebook-ID': notebookId }, ...(data === undefined ? {} : {body: JSON.stringify(data)}) });
   const result = await response.json(); if (!response.ok) throw new Error(result.error || '操作失败'); return result;
 }
 function run(fn) { return async event => { try { await fn(event); } catch (error) { status(error.message, true); } }; }
@@ -44,6 +44,7 @@ async function search(reset = true) {
     card.append(el('div', cite(p), 'citation'), el('p', p.text, 'excerpt'));
     const actions = el('div', undefined, 'toolbar');
     actions.append(
+      button('查看全文', () => showSource(p)),
       button('加入对话', () => { addContext(p); }),
       button('对照', () => { if (comparison.size >= 2 && !comparison.has(p.id)) throw new Error('对照区最多两段，请先移除一段。'); comparison.set(p.id, p); updateComparison(); }),
       button('写笔记', () => { addContext(p, true); selectTab('notes'); $('note-passage').value = p.id; $('note-body').focus(); }));
@@ -63,7 +64,7 @@ function updateContext() {
   $('context-chips').replaceChildren();
   if (!context.size) $('context-chips').append(el('span', '在左侧检索结果中点“加入对话”。', 'muted'));
   context.forEach(p => {
-    const chip = el('span', undefined, 'chip'); chip.append(el('span', shortCite(p)));
+    const chip = el('span', undefined, 'chip'); chip.append(button(shortCite(p),()=>showSource(p)));
     if (!currentConv) { const x = el('button', '✕'); x.title = '移除'; x.addEventListener('click', () => { context.delete(p.id); updateContext(); refreshNotePassages(); }); chip.append(x); }
     $('context-chips').append(chip);
   });
@@ -104,30 +105,32 @@ async function selectConversation(id) {
 }
 function renderMessage(m) {
   const div = el('div', undefined, 'msg ' + m.role);
-  div.append(el('div', m.role === 'user' ? '你' : 'AI 助手', 'who'), el('div', m.body, 'body'));
+  div.append(el('div', m.role === 'user' ? '你' : 'AI 助手', 'who'), messageBody(m.body));
+  if(m.role==='assistant') div.append(button('保存为笔记',async()=>{const first=[...context.values()][0];if(!first)throw new Error('当前没有关联原文。');await api('notes',{passage_id:first.id,kind:'AI 推断',body:m.body});await loadNotes();selectTab('notes');status('回答已保存为 AI 推断笔记。');}));
   (m.warnings || []).forEach(w => div.append(el('div', '⚠ ' + w, 'warn')));
   div.append(el('div', m.created || '', 'time'));
   return div;
 }
 function scrollMessages() { $('messages').scrollTop = $('messages').scrollHeight; }
 async function sendChat() {
-  if (chatBusy) return;
+  if (chatBusy || aiBusy) return;
   const text = $('chat-input').value.trim();
   if (!text) throw new Error('请输入问题。');
   if (!currentConv && !context.size) throw new Error('请先在左侧选择依据原文。');
   if (!aiConfig.model) { $('settings-dialog').showModal(); throw new Error('请先配置并保存 AI 接口。'); }
-  chatBusy = true; $('send-chat').disabled = true;
+  chatBusy = true; setBusy(true);
+  let succeeded=false;
   $('messages').append(renderMessage({ role: 'user', body: text }));
   scrollMessages(); status('AI 正在回答…');
   const thinking = el('div', undefined, 'msg assistant'); thinking.append(el('div', 'AI 助手', 'who'), el('div', '思考中…', 'body')); $('messages').append(thinking); scrollMessages();
   try {
     const payload = currentConv ? { conversation_id: currentConv.id, message: text } : { ids: [...context.keys()], message: text };
     const r = await api('chat', payload);
-    thinking.remove();
+    thinking.remove();succeeded=true;
     $('messages').append(renderMessage({ role: 'assistant', body: r.text, warnings: r.warnings }));
     scrollMessages(); $('chat-input').value = ''; status('回答已保存到本次对话。');
-    if (!currentConv) { await loadConversations(); $('conv-select').value = String(r.conversation_id); await selectConversation(r.conversation_id); }
-  } finally { chatBusy = false; $('send-chat').disabled = false; }
+    await loadConversations(); $('conv-select').value = String(r.conversation_id); await selectConversation(r.conversation_id);
+  } finally { thinking.remove();chatBusy = false;setBusy(false); if(!succeeded){const pending=$('messages').querySelector('.msg.user:last-of-type');if(pending)pending.remove();status('请求失败，问题仍保留，可重试。',true);} }
 }
 
 /* ---------- 右栏：对照 / 笔记 / 分析 ---------- */
@@ -152,7 +155,7 @@ async function loadNotes() {
     const card = el('div', undefined, 'note-card');
     card.append(el('span', n.kind, 'tag'), el('p', cite(n), 'citation'), el('p', n.body, 'body'), el('p', n.created, 'muted'));
     const actions = el('div', undefined, 'actions');
-    actions.append(button('编辑', () => { editingNote = n.id; $('note-passage').value = n.passage_id; $('note-kind').value = n.kind; $('note-body').value = n.body; $('note-submit').textContent = '保存修改'; $('note-cancel').hidden = false; $('note-body').focus(); }),
+    actions.append(button('编辑', () => { editingNote = n.id; $('note-passage').required=false; $('note-passage').disabled=true; $('note-passage').value = n.passage_id; $('note-kind').value = n.kind; $('note-body').value = n.body; $('note-submit').textContent = '保存修改'; $('note-cancel').hidden = false; $('note-body').focus(); }),
       button('删除', async () => { if (!confirm('删除这条笔记？')) return; await api('note-delete', { id: n.id }); await loadNotes(); status('笔记已删除。'); }));
     card.append(actions); $('notes-list').append(card);
   });
@@ -178,9 +181,10 @@ async function loadSettings() {
   $('api-base').value = aiConfig.base_url; $('api-model').value = aiConfig.model;
   $('api-tokens').value = aiConfig.max_tokens; $('api-token-field').value = aiConfig.token_field;
   $('remember-key').checked = aiConfig.key_saved; $('remember-key').disabled = !aiConfig.can_save_key;
+  $('ai-destination').textContent=`AI 接口：${aiConfig.base_url} · 模型：${aiConfig.model||'尚未配置'}。发起请求会发送所选原文及最近对话。`;
   $('key-status').textContent = aiConfig.has_key ? (aiConfig.key_saved ? '密钥已由 Windows 加密保存。' : '密钥仅在本次程序运行期间有效。') : '尚未填写密钥。本机无密钥服务可留空。';
 }
-function download(name, text, type) { const u = URL.createObjectURL(new Blob([text], { type })); const a = el('a'); a.href = u; a.download = name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 1000); }
+async function download(name, text, type) { if(window.pywebview?.api){const r=await window.pywebview.api.save_text(name,text);status(r.saved?'文件已保存。':'已取消保存。');return;}  const u = URL.createObjectURL(new Blob([text], { type })); const a = el('a'); a.href = u; a.download = name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 1000); }
 
 /* ---------- 事件 ---------- */
 $('search').addEventListener('click', run(() => search()));
@@ -193,23 +197,23 @@ $('conv-delete').addEventListener('click', run(async () => { if (!currentConv) r
 $('send-chat').addEventListener('click', run(sendChat));
 $('chat-input').addEventListener('keydown', run(e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); return sendChat(); } }));
 $('btn-analyze').addEventListener('click', run(async () => {
-  if (aiBusy) return; if (!context.size) throw new Error('请先在左侧选择依据原文。');
+  if (aiBusy || chatBusy) return; if (!context.size) throw new Error('请先在左侧选择依据原文。');
   if (!aiConfig.model) { $('settings-dialog').showModal(); throw new Error('请先配置并保存 AI 接口。'); }
-  const ids = [...context.keys()], question = $('analysis-question').value;
-  aiBusy = true; $('btn-analyze').disabled = true; status('正在生成结构化分析，可能需要几分钟…');
+  const ids = [...context.keys()], question = $('analysis-question').value || $('chat-input').value;
+  aiBusy = true; setBusy(true);selectTab('analyses'); status('正在生成结构化分析，可能需要几分钟…');
   try { const r = await api('analyze', { ids, question }); $('ai-result').replaceChildren(renderAnalysis({ ...r, question })); await loadAnalyses(); status('结构化分析已保存。'); }
-  finally { aiBusy = false; $('btn-analyze').disabled = false; }
+  finally { aiBusy = false;setBusy(false); }
 }));
 $('btn-make-prompt').addEventListener('click', run(async () => { const r = await api('prompt', { ids: [...context.keys()], question: $('analysis-question').value }); $('prompt').value = r.prompt; status('提示词已生成；尚未执行 AI 分析。'); }));
 $('download-prompt').addEventListener('click', run(() => { if (!$('prompt').value) throw new Error('请先生成提示词。'); download('research-prompt.txt', $('prompt').value, 'text/plain;charset=utf-8'); }));
 $('note-form').addEventListener('submit', run(async e => {
   e.preventDefault();
   const payload = { passage_id: Number($('note-passage').value), kind: $('note-kind').value, body: $('note-body').value };
-  if (editingNote) { await api('note-update', { id: editingNote, ...payload }); editingNote = null; $('note-submit').textContent = '保存笔记'; $('note-cancel').hidden = true; status('笔记已更新。'); }
+  if (editingNote) { await api('note-update', { id: editingNote, ...payload }); editingNote = null; $('note-passage').required=true;$('note-passage').disabled=false; $('note-submit').textContent = '保存笔记'; $('note-cancel').hidden = true; status('笔记已更新。'); }
   else { await api('notes', payload); status('笔记已保存。'); }
   $('note-body').value = ''; await loadNotes();
 }));
-$('note-cancel').addEventListener('click', () => { editingNote = null; $('note-submit').textContent = '保存笔记'; $('note-cancel').hidden = true; $('note-body').value = ''; });
+$('note-cancel').addEventListener('click', () => { editingNote = null; $('note-passage').required=true;$('note-passage').disabled=false; $('note-submit').textContent = '保存笔记'; $('note-cancel').hidden = true; $('note-body').value = ''; });
 $('btn-import').addEventListener('click', () => $('import-dialog').showModal());
 $('btn-settings').addEventListener('click', () => $('settings-dialog').showModal());
 $('import-form').addEventListener('submit', run(async e => {
@@ -228,4 +232,14 @@ $('forget-key').addEventListener('click', run(async () => { await api('settings'
 $('test-ai').addEventListener('click', run(async () => { const b = $('test-ai'); b.disabled = true; status('正在测试已保存的接口配置…'); try { const r = await api('ai-test', {}); status(r.message); } finally { b.disabled = false; } }));
 $('btn-export-md').addEventListener('click', run(async () => download('research-notes.md', (await api('export')).markdown, 'text/markdown;charset=utf-8')));
 $('btn-export-json').addEventListener('click', run(async () => download('research-data.json', JSON.stringify((await api('export')).backup, null, 2), 'application/json;charset=utf-8')));
-run(async () => { token = (await api('session')).token; await loadBooks(); await search(); await loadNotes(); await loadAnalyses(); updateContext(); updateComparison(); newConversation(); await loadConversations(); await loadSettings(); })();
+run(async () => { token = (await api('session')).token; await loadNotebooks(); await loadBooks(); await search(); await loadNotes(); await loadAnalyses(); updateContext(); updateComparison(); newConversation(); await loadConversations(); await loadSettings(); })();
+
+function showSource(p){$('source-citation').textContent=cite(p);$('source-body').textContent=p.text;$('source-dialog').showModal();}
+function messageBody(text){const body=el('div',undefined,'body');const pattern=/\bP(\d+)\b/g;let start=0;for(const m of text.matchAll(pattern)){body.append(document.createTextNode(text.slice(start,m.index)));const p=context.get(Number(m[1]));body.append(p?button(m[0],()=>showSource(p)):document.createTextNode(m[0]));start=m.index+m[0].length;}body.append(document.createTextNode(text.slice(start)));return body;}
+function setBusy(busy){['notebook-select','new-notebook','conv-select','conv-delete','btn-import','book-filter','send-chat','btn-analyze'].forEach(id=>$(id).disabled=busy);}
+async function loadNotebooks(){const rows=await api('notebooks');if(!rows.some(r=>r.id===notebookId))notebookId='default';$('notebook-select').replaceChildren();rows.forEach(r=>{const o=el('option',r.name);o.value=r.id;$('notebook-select').append(o);});$('notebook-select').value=notebookId;}
+async function switchNotebook(id){if(chatBusy||aiBusy)throw new Error('请等待当前分析完成。');notebookId=id;localStorage.setItem('notebook',id);context.clear();comparison.clear();editingNote=null;lastResults=[];$('query').value='';$('book-filter').value='';$('note-cancel').click();$('chat-input').value='';$('analysis-question').value='';$('ai-result').replaceChildren();$('prompt').value='';newConversation();updateComparison();await loadBooks();await search();await loadNotes();await loadAnalyses();await loadConversations();status('已切换研究本。');}
+$('notebook-select').addEventListener('change',run(e=>switchNotebook(e.target.value)));
+$('new-notebook').addEventListener('click',()=>{$('notebook-dialog').showModal();$('notebook-name').focus();});
+$('notebook-form').addEventListener('submit',run(async e=>{e.preventDefault();const n=await api('notebook-create',{name:$('notebook-name').value});await loadNotebooks();await switchNotebook(n.id);$('notebook-select').value=n.id;$('notebook-dialog').close();$('notebook-name').value='';}));
+$('open-data').addEventListener('click',run(async()=>{if(window.pywebview?.api)await window.pywebview.api.open_data_folder();else status('源码模式的数据目录位于项目 data 文件夹。');}));

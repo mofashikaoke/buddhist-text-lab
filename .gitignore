@@ -9,3 +9,8 @@ dist/
 *.spec
 ai-settings.json
 smoke-result.txt
+
+installer-output/
+installer-assets/
+notebooks.json
+notebooks/

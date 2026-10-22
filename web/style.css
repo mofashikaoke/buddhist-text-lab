@@ -53,3 +53,5 @@ summary{cursor:pointer;font-weight:600}
 a{color:var(--green)}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 [hidden]{display:none!important}
 @media(max-width:1100px){#layout{grid-template-columns:1fr;overflow-y:auto}#sources,#studio{border:0;border-bottom:1px solid var(--line);overflow:visible}#chat-pane{min-height:60vh}}
+
+.notebooks{display:flex;align-items:center;gap:8px;margin-left:16px}.notebooks select{margin:0;max-width:220px}.notebooks button{white-space:nowrap}.full-source{max-height:65vh;line-height:2;font-size:18px}.body button{padding:1px 5px;border:0;background:#e4ecfa;color:#234f9a;font-size:12px;border-radius:4px;vertical-align:baseline}#topbar{flex-wrap:wrap;height:auto;min-height:70px;gap:8px}.ver{display:none}#studio{background:#f5f7fb}.pane-head h2{letter-spacing:.04em}.msg.assistant{background:#fff;box-shadow:0 3px 16px #26382c06}.msg.assistant>button{font-size:12px;margin-top:10px}.chip>button{color:#315944}.fine{line-height:1.6}#source-dialog{max-width:850px}.tabs button{white-space:nowrap;padding:8px 9px}
