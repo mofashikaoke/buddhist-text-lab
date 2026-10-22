@@ -61,6 +61,43 @@ class ResearchTests(unittest.TestCase):
         self.lib.import_book('gb.txt', '中文测试'.encode('gb18030'), '编码测试')
         self.assertEqual(self.lib.passages()['items'][0]['text'], '中文测试')
 
+    def test_conversation_grounding_flow(self):
+        self.lib.import_book('test.txt', '第一段原文。\n\n第二段原文。'.encode(), '测试典籍')
+        pids = [p['id'] for p in self.lib.passages()['items']]
+        with self.assertRaises(ValueError):
+            self.lib.create_conversation('空', [], 'm', 'http://127.0.0.1:1')
+        conv = self.lib.create_conversation('', pids, 'test-model', 'http://127.0.0.1:1')
+        self.assertIn('测试典籍', conv['title'])
+        self.assertEqual(len(self.lib.list_conversations()), 1)
+        self.lib.add_message(conv['id'], 'user', '核心论点是什么？')
+        self.lib.add_message(conv['id'], 'assistant', '依据 P1……', ['编号检查仅确认引用是否来自所选材料；引文准确性和推理仍需核查。'])
+        got = self.lib.get_conversation(conv['id'])
+        self.assertEqual(len(got['messages']), 2)
+        self.assertEqual(len(got['conversation']['context']), 2)
+        self.assertEqual(got['messages'][1]['warnings'][0][:2], '编号')
+        self.lib.delete_conversation(conv['id'])
+        self.assertEqual(self.lib.list_conversations(), [])
+        with self.assertRaises(ValueError):
+            self.lib.get_conversation(conv['id'])
+
+    def test_note_update_delete_and_book_delete(self):
+        self.lib.import_book('test.txt', '原文段落'.encode(), '测试典籍')
+        p = self.lib.passages()['items'][0]
+        nid = self.lib.add_note(p['id'], '个人笔记', '初版')
+        self.lib.update_note(nid, '待核查', '修订版')
+        self.assertEqual(self.lib.notes()[0]['body'], '修订版')
+        self.lib.delete_note(nid)
+        self.assertEqual(self.lib.notes(), [])
+        with self.assertRaises(ValueError):
+            self.lib.delete_note(999)
+        nid = self.lib.add_note(p['id'], '个人笔记', '随书删除')
+        self.lib.delete_book(self.lib.books()[0]['id'])
+        self.assertEqual(self.lib.books(), [])
+        self.assertEqual(self.lib.passages()['total'], 0)
+        self.assertEqual(self.lib.notes(), [])
+        with self.assertRaises(ValueError):
+            self.lib.delete_book(999)
+
     def test_http_and_request_protection(self):
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         server.db_path = self.path

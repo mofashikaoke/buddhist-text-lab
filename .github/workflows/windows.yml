@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build Windows installer
 on:
   push:
     branches: [main]
@@ -8,7 +8,7 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,34 +19,43 @@ jobs:
         run: python -m pip install -r requirements.txt pyinstaller
       - name: Test research and AI functions
         run: python -m unittest -v
-      - name: Build standalone executable
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name BuddhistTextLab --add-data "web:web" --collect-all pypdf desktop.py
+      - name: Build application folder
+        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name BuddhistTextLab --add-data "web;web" --collect-all pypdf desktop.py
       - name: Smoke test packaged executable
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath dist/BuddhistTextLab.exe -ArgumentList '--smoke-test', 'smoke-result.txt' -PassThru
+          $p = Start-Process -FilePath dist/BuddhistTextLab/BuddhistTextLab.exe -ArgumentList '--smoke-test', 'smoke-result.txt' -PassThru
           if (-not $p.WaitForExit(90000)) { $p.Kill(); throw 'Executable smoke test timed out' }
           if ($p.ExitCode -ne 0 -or -not (Test-Path smoke-result.txt)) { throw 'Executable smoke test failed' }
           Get-Content smoke-result.txt
-      - name: Create download package and checksum
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Compile installer
         shell: pwsh
         run: |
-          Copy-Item WINDOWS.md dist/README-Windows.md
-          $hash = (Get-FileHash dist/BuddhistTextLab.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  BuddhistTextLab.exe" | Out-File dist/SHA256SUMS.txt -Encoding ascii
-          Compress-Archive -Path dist/BuddhistTextLab.exe,dist/README-Windows.md,dist/SHA256SUMS.txt -DestinationPath BuddhistTextLab-Windows-x64.zip
+          $version = "0.3.${{ github.run_number }}"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/BuddhistTextLab.iss /DAppVersion="$version"
+          $setup = Get-ChildItem installer-output/BuddhistTextLab-Setup-*.exe | Select-Object -First 1
+          $hash = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($setup.Name)" | Out-File installer-output/SHA256SUMS.txt -Encoding ascii
+          "SETUP_NAME=$($setup.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SETUP_PATH=$($setup.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/BuddhistTextLab -DestinationPath installer-output/BuddhistTextLab-Windows-x64-portable.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: BuddhistTextLab-Windows-x64
+          name: BuddhistTextLab-Setup
           path: |
-            dist/BuddhistTextLab.exe
-            dist/SHA256SUMS.txt
-            dist/README-Windows.md
+            installer-output/BuddhistTextLab-Setup-*.exe
+            installer-output/SHA256SUMS.txt
           retention-days: 90
-      - name: Publish private repository release
+      - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v0.2.${{ github.run_number }}"
-          gh release create $tag dist/BuddhistTextLab.exe BuddhistTextLab-Windows-x64.zip dist/SHA256SUMS.txt --target '${{ github.sha }}' --title "佛典研究工作台 $tag · Windows x64" --notes-file WINDOWS.md
+          $tag = "v0.3.${{ github.run_number }}"
+          gh release create $tag $env:SETUP_PATH installer-output/SHA256SUMS.txt installer-output/BuddhistTextLab-Windows-x64-portable.zip --target '${{ github.sha }}' --title "佛典研究工作台 $tag · Windows 安装程序" --notes-file WINDOWS.md

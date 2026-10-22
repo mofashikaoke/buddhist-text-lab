@@ -15,7 +15,7 @@ python -m unittest -v
 python server.py
 ```
 
-提交前确保相关测试通过。涉及原文提取、页码、选材或 AI 接口的改动，请增加真实行为测试。Windows EXE 的打包与启动检查由 GitHub Actions 完成。
+提交前确保相关测试通过。涉及原文提取、页码、选材或 AI 接口的改动，请增加真实行为测试。Windows 安装程序的打包与启动检查由 GitHub Actions 完成。
 
 ## Pull Request
 
@@ -25,7 +25,7 @@ python server.py
 
 - PDF 原页定位及文字提取质量。
 - AI 输出引文逐字核对与回归评估。
-- 笔记编辑、版本记录和备份恢复。
+- 笔记版本记录和备份恢复。
 - 繁简、异体字检索以及文档完善。
 
 ## 许可

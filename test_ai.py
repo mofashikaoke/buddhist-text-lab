@@ -92,6 +92,46 @@ class AITests(unittest.TestCase):
         warnings = citation_warnings('[P1] and [P99]', [{'id': 1}])
         self.assertTrue(any('P99' in w for w in warnings))
 
+    def test_chat_conversation_grounding_and_history(self):
+        db = str(Path(self.tmp.name) / 'chat.sqlite3')
+        lib = Library(db)
+        lib.import_book('test.txt', '选中原文\n\n没有选取的秘密段落'.encode(), '测试典籍')
+        lib.close()
+        app = create_server(db)
+        app.ai_settings.save(self.config)
+        thread = threading.Thread(target=app.serve_forever, daemon=True)
+        thread.start()
+        try:
+            def post(path, payload):
+                req = Request(f'http://127.0.0.1:{app.server_port}{path}',
+                              json.dumps(payload).encode(),
+                              headers={'X-Research-Token': TOKEN, 'Content-Type': 'application/json'})
+                with urlopen(req) as r:
+                    return json.load(r)
+            first = post('/api/chat', {'ids': [1], 'message': '第一问'})
+            self.assertIn('conversation_id', first)
+            self.assertIn('P1', first['text'])
+            sent = MockModel.received['payload']['messages']
+            self.assertIn('选中原文', sent[0]['content'])
+            self.assertNotIn('没有选取的秘密段落', sent[0]['content'])
+            self.assertEqual(sent[-1]['content'], '第一问')
+            second = post('/api/chat', {'conversation_id': first['conversation_id'], 'message': '第二问'})
+            sent = MockModel.received['payload']['messages']
+            self.assertEqual(sent[-3]['content'], '第一问')
+            self.assertEqual(sent[-2]['content'], '原文支持此解释 [P1]。')
+            self.assertEqual(sent[-1]['content'], '第二问')
+            with urlopen(f'http://127.0.0.1:{app.server_port}/api/conversation?id=' + str(first['conversation_id'])) as r:
+                saved = json.load(r)
+            self.assertEqual(len(saved['messages']), 4)
+            self.assertTrue(any('P1' in w or '编号' in w for m in saved['messages'] for w in m['warnings']))
+            lib = Library(db)
+            self.assertEqual(len(lib.list_conversations()), 1)
+            lib.close()
+        finally:
+            app.shutdown()
+            app.server_close()
+            thread.join()
+
     def test_full_analysis_saves_selected_evidence_only(self):
         db = str(Path(self.tmp.name) / 'research.sqlite3')
         lib = Library(db)

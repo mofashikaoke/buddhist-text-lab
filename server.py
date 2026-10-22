@@ -9,8 +9,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from core import Library, notes_markdown, analyses_markdown, research_prompt
-from ai import Settings, complete, citation_warnings
+from core import Library, notes_markdown, analyses_markdown, research_prompt, chat_messages, conversations_markdown
+from ai import Settings, complete, complete_messages, citation_warnings
 
 ROOT = Path(__file__).parent
 TOKEN = secrets.token_urlsafe(32)
@@ -54,12 +54,18 @@ class Handler(BaseHTTPRequestHandler):
                                     100, max(0, int(q.get('offset', ['0'])[0])))
             elif route.path == '/api/notes':
                 data = lib.notes()
+            elif route.path == '/api/conversations':
+                data = lib.list_conversations()
+            elif route.path == '/api/conversation':
+                data = lib.get_conversation(int(q.get('id', ['0'])[0]))
             elif route.path == '/api/analyses':
                 data = lib.analyses()
             elif route.path == '/api/settings':
                 data = self.server.ai_settings.public()
             elif route.path == '/api/export':
-                data = {'markdown': notes_markdown(lib.notes()) + analyses_markdown(lib.analyses()), 'backup': lib.backup()}
+                convs = [lib.get_conversation(c['id']) for c in lib.list_conversations()]
+                data = {'markdown': notes_markdown(lib.notes()) + analyses_markdown(lib.analyses())
+                        + conversations_markdown(convs), 'backup': lib.backup()}
             else:
                 return self.respond(404, {'error': '页面不存在。'})
             self.respond(200, data)
@@ -89,6 +95,41 @@ class Handler(BaseHTTPRequestHandler):
                 elif self.path == '/api/notes':
                     lib.add_note(data['passage_id'], data['kind'], data['body'])
                     result = {'saved': True}
+                elif self.path == '/api/note-update':
+                    result = lib.update_note(data['id'], data['kind'], data['body'])
+                elif self.path == '/api/note-delete':
+                    result = lib.delete_note(data['id'])
+                elif self.path == '/api/book-delete':
+                    result = lib.delete_book(data['id'])
+                elif self.path == '/api/conversation-delete':
+                    result = lib.delete_conversation(data['id'])
+                elif self.path == '/api/chat':
+                    message = str(data.get('message', ''))
+                    if not message.strip():
+                        raise ValueError('请输入问题。')
+                    config = self.server.ai_settings.snapshot()
+                    cid = data.get('conversation_id')
+                    if cid:
+                        conv = lib.get_conversation(int(cid))
+                        passages = conv['conversation']['context']
+                        history = [(m['role'], m['body']) for m in conv['messages']]
+                        cid = int(cid)
+                    else:
+                        ids = list(dict.fromkeys(data.get('ids', [])))
+                        created = lib.create_conversation(str(data.get('title', '')), ids,
+                                                          config['model'], config['base_url'])
+                        cid = created['id']
+                        conv = lib.get_conversation(cid)
+                        passages = conv['conversation']['context']
+                        history = []
+                    result = complete_messages(config, chat_messages(passages, history, message))
+                    warnings = citation_warnings(result['text'], passages)
+                    if result['finish_reason'] == 'length':
+                        warnings.insert(0, '模型输出因 token 上限而截断；本条回答不完整。')
+                    lib.add_message(cid, 'user', message)
+                    mid = lib.add_message(cid, 'assistant', result['text'], warnings)
+                    result = {'conversation_id': cid, 'message_id': mid, 'text': result['text'],
+                              'warnings': warnings, 'usage': result.get('usage', {})}
                 elif self.path == '/api/settings':
                     result = self.server.ai_settings.save(data)
                 elif self.path == '/api/ai-test':
