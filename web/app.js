@@ -34,14 +34,14 @@ async function loadBooks() {
 }
 async function search(reset = true) {
   if (reset) offset = 0;
-  const q = new URLSearchParams({ book: $('book-filter').value, q: $('query').value, offset: String(offset) });
+  const q = new URLSearchParams({ book: $('book-filter').value, q: $('query').value, offset: String(offset), fold: $('fold-script').checked ? '1' : '0' });
   const result = await api('passages?' + q); total = result.total; lastResults = result.items;
-  $('result-count').textContent = `共 ${total} 段${total ? ' · 当前 ' + (offset + 1) + '—' + (offset + result.items.length) : ''}。按文件顺序排列；多个关键词用空格分隔，须同时出现；不做语义扩展或繁简转换。`;
+  $('result-count').textContent = `共 ${total} 段${total ? ' · 当前 ' + (offset + 1) + '—' + (offset + result.items.length) : ''}。按文件顺序排列；多个关键词用空格分隔，须同时出现；不做语义扩展；繁简互通默认关闭。`;
   $('results').replaceChildren();
   if (!result.items.length) $('results').append(el('p', '没有匹配的原文。', 'empty'));
   result.items.forEach(p => {
     const card = el('article', undefined, 'passage');
-    card.append(el('div', cite(p), 'citation'), highlight(p.text, $('query').value));
+    card.append(el('div', cite(p), 'citation'), highlight(p.text, result.highlight));
     const actions = el('div', undefined, 'toolbar');
     actions.append(
       button('查看全文', () => showSource(p)),
@@ -53,8 +53,8 @@ async function search(reset = true) {
   $('previous').disabled = offset === 0; $('next').disabled = offset + 100 >= total;
   refreshNotePassages();
 }
-function highlight(text, query) {
-  const p = el('p', undefined, 'excerpt'), terms = [...new Set(query.split(/\s+/).filter(Boolean))].sort((a, b) => b.length - a.length);
+function highlight(text, forms) {
+  const p = el('p', undefined, 'excerpt'), terms = [...new Set(forms)].sort((a, b) => b.length - a.length);
   if (!terms.length) { p.textContent = text; return p; }
   const pattern = new RegExp(terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
   let start = 0;
@@ -199,6 +199,7 @@ async function download(name, text, type) { if(window.pywebview?.api){const r=aw
 $('search').addEventListener('click', run(() => search()));
 $('query').addEventListener('keydown', run(e => { if (e.key === 'Enter') return search(); }));
 $('book-filter').addEventListener('change', run(() => search()));
+$('fold-script').addEventListener('change', run(() => search()));
 $('previous').addEventListener('click', run(() => { offset = Math.max(0, offset - 100); return search(false); }));
 $('next').addEventListener('click', run(() => { offset += 100; return search(false); }));
 $('conv-select').addEventListener('change', run(e => selectConversation(e.target.value)));

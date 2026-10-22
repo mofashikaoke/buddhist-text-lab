@@ -59,7 +59,8 @@ class Handler(BaseHTTPRequestHandler):
                 data = lib.books()
             elif route.path == '/api/passages':
                 data = lib.passages(q.get('book', [None])[0], q.get('q', [''])[0],
-                                    100, max(0, int(q.get('offset', ['0'])[0])))
+                                    100, max(0, int(q.get('offset', ['0'])[0])),
+                                    q.get('fold', ['0'])[0] == '1')
             elif route.path == '/api/notes':
                 data = lib.notes()
             elif route.path == '/api/conversations':

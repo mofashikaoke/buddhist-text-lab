@@ -37,6 +37,16 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(self.lib.passages(query='无我 如是')['total'], 0)
         self.assertEqual(self.lib.passages(query='   ')['total'], 3)
 
+    def test_script_folding_is_opt_in(self):
+        self.lib.import_book('t.txt', '觀自在菩薩，般若波羅蜜多。\n\n观自在菩萨在此。\n\n無關內容。'.encode(), '繁简')
+        self.assertEqual(self.lib.passages(query='观自在')['total'], 1)
+        self.assertEqual(self.lib.passages(query='觀自在')['total'], 1)
+        result = self.lib.passages(query='观自在', fold_script=True)
+        self.assertEqual(result['total'], 2)
+        self.assertIn('觀自在', result['highlight'])
+        self.assertEqual(self.lib.passages(query='般若波罗蜜多 菩萨', fold_script=True)['total'], 1)
+        self.assertEqual(self.lib.passages(query='無關', fold_script=True)['total'], 1)
+
     def test_oversized_block_is_split_without_losing_text(self):
         lines = [f'第{i}行' + '文' * 200 + '。' for i in range(20)]
         self.lib.import_book('lines.txt', '\n'.join(lines).encode(), '分行文本')

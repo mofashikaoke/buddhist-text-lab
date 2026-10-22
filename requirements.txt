@@ -1,2 +1,4 @@
 # Only needed for PDF import. TXT/Markdown features use the Python standard library.
 pypdf>=5,<7
+# Optional traditional/simplified search.
+opencc-python-reimplemented==0.1.7

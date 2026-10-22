@@ -20,7 +20,7 @@ jobs:
       - name: Test research and AI functions
         run: python -m unittest -v
       - name: Build application folder
-        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name BuddhistTextLab --add-data "web;web" --collect-all pypdf --collect-all webview desktop.py
+        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name BuddhistTextLab --add-data "web;web" --collect-all pypdf --collect-all opencc --collect-all webview desktop.py
       - name: Smoke test packaged executable
         shell: pwsh
         run: |

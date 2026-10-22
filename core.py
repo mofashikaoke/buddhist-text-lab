@@ -11,6 +11,16 @@ MAX_CONTEXT_PASSAGES = 20
 MAX_PARAGRAPH = 1500
 
 
+def script_variants(term):
+    """The term plus its traditional and simplified forms (opt-in; needs opencc)."""
+    try:
+        from opencc import OpenCC
+    except ImportError:
+        raise ValueError('繁简互通检索需要先安装 requirements.txt 中的 opencc-python-reimplemented。')
+    forms = [term, OpenCC('s2t').convert(term), OpenCC('t2s').convert(term)]
+    return list(dict.fromkeys(forms))
+
+
 def split_paragraphs(text):
     """Split on blank lines; an oversized block is split further at line breaks, then at sentence ends."""
     for block in re.split(r'\n\s*\n', text.replace('\r\n', '\n')):
@@ -140,23 +150,25 @@ class Library:
             self.db.execute('DELETE FROM books WHERE id=?', (book_id,))
         return {'deleted': book_id}
 
-    def passages(self, book_id=None, query='', limit=200, offset=0):
-        clauses, params = [], []
+    def passages(self, book_id=None, query='', limit=200, offset=0, fold_script=False):
+        clauses, params, highlight = [], [], []
         if book_id:
             clauses.append('p.book_id=?')
             params.append(int(book_id))
         for term in query.split():
             # instr implements literal matching, including %, _, and quotation marks.
             # Whitespace-separated terms must all appear in the same passage.
-            clauses.append('instr(p.text,?)>0')
-            params.append(term)
+            forms = script_variants(term) if fold_script else [term]
+            clauses.append('(' + ' OR '.join('instr(p.text,?)>0' for _ in forms) + ')')
+            params.extend(forms)
+            highlight.extend(forms)
         where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
         sql = '''SELECT p.*,b.title,b.author,b.edition FROM passages p
                  JOIN books b ON b.id=p.book_id''' + where
         count = self.db.execute('SELECT COUNT(*) FROM (' + sql + ')', params).fetchone()[0]
         rows = self.db.execute(sql + ' ORDER BY p.book_id,p.ordinal LIMIT ? OFFSET ?',
                                params + [limit, offset]).fetchall()
-        return {'total': count, 'items': [dict(r) for r in rows]}
+        return {'total': count, 'items': [dict(r) for r in rows], 'highlight': highlight}
 
     def passage(self, pid):
         r = self.db.execute('''SELECT p.*,b.title,b.author,b.edition FROM passages p
