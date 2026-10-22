@@ -142,6 +142,8 @@ class AITests(unittest.TestCase):
                     return json.load(r)
             first = post('/api/chat', {'ids': [1], 'message': '第一问'})
             self.assertIn('conversation_id', first)
+            with urlopen(f'http://127.0.0.1:{app.server_port}/api/conversations') as r:
+                self.assertEqual(json.load(r)[0]['title'], '第一问')
             self.assertIn('P1', first['text'])
             sent = MockModel.received['payload']['messages']
             self.assertIn('选中原文', sent[0]['content'])

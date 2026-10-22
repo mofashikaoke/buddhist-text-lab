@@ -114,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = lib.delete_note(data['id'])
                 elif self.path == '/api/book-delete':
                     result = lib.delete_book(data['id'])
+                elif self.path == '/api/conversation-rename':
+                    result = lib.rename_conversation(data['id'], str(data.get('title', '')))
                 elif self.path == '/api/conversation-delete':
                     result = lib.delete_conversation(data['id'])
                 elif self.path == '/api/chat':
@@ -130,7 +132,7 @@ class Handler(BaseHTTPRequestHandler):
                         cid = int(cid)
                     else:
                         ids = list(dict.fromkeys(data.get('ids', [])))
-                        created = lib.create_conversation(str(data.get('title', '')), ids,
+                        created = lib.create_conversation(str(data.get('title', '')) or ' '.join(message.split())[:30], ids,
                                                           config['model'], config['base_url'])
                         cid = created['id']
                         conv = lib.get_conversation(cid)

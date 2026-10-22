@@ -110,6 +110,12 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(len(got['messages']), 2)
         self.assertEqual(len(got['conversation']['context']), 2)
         self.assertEqual(got['messages'][1]['warnings'][0][:2], '编号')
+        self.assertEqual(self.lib.rename_conversation(conv['id'], '  般若研读  ')['title'], '般若研读')
+        self.assertEqual(self.lib.get_conversation(conv['id'])['conversation']['title'], '般若研读')
+        with self.assertRaises(ValueError):
+            self.lib.rename_conversation(conv['id'], '   ')
+        with self.assertRaises(ValueError):
+            self.lib.rename_conversation(999, '不存在')
         self.lib.delete_conversation(conv['id'])
         self.assertEqual(self.lib.list_conversations(), [])
         with self.assertRaises(ValueError):

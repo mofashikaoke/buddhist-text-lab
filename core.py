@@ -274,6 +274,16 @@ class Library:
                                   (int(cid), role, body.strip(), json.dumps(list(warnings), ensure_ascii=False)))
         return cur.lastrowid
 
+    def rename_conversation(self, cid, title):
+        title = (title or '').strip()[:60]
+        if not title:
+            raise ValueError('对话名称不能为空。')
+        with self.db:
+            cur = self.db.execute('UPDATE conversations SET title=? WHERE id=?', (title, int(cid)))
+            if not cur.rowcount:
+                raise ValueError('对话不存在。')
+        return {'id': int(cid), 'title': title}
+
     def delete_conversation(self, cid):
         with self.db:
             cur = self.db.execute('DELETE FROM conversations WHERE id=?', (int(cid),))

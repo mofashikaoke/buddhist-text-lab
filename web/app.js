@@ -4,7 +4,11 @@ let token = '', offset = 0, total = 0, aiConfig = {}, aiBusy = false, chatBusy =
 const context = new Map(), comparison = new Map();
 let currentConv = null, editingNote = null, lastResults = [], notebookId = localStorage.getItem('notebook') || 'default';
 function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
-function status(message, error = false) { $('status').textContent = message; $('status').className = error ? 'error' : ''; }
+let statusTimer;
+function status(message, error = false) {
+  $('status').textContent = message; $('status').className = error ? 'error' : '';
+  clearTimeout(statusTimer); statusTimer = setTimeout(() => { $('status').textContent = ''; }, error ? 9000 : 5000);
+}
 async function api(path, data) {
   const response = await fetch('/api/' + path, { method: data === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'X-Research-Token': token, 'X-Notebook-ID': notebookId }, ...(data === undefined ? {} : {body: JSON.stringify(data)}) });
   const result = await response.json(); if (!response.ok) throw new Error(result.error || '操作失败'); return result;
@@ -12,6 +16,14 @@ async function api(path, data) {
 function run(fn) { return async event => { try { await fn(event); } catch (error) { status(error.message, true); } }; }
 function cite(p) { return `《${p.title}》 · ${p.author || '译者/作者未记录'} · ${p.edition || '版本未记录'} · ${p.page ? 'PDF 第 ' + p.page + ' 页（文件物理页）' : '文本无页码'} · 段 ${p.ordinal} · P${p.passage_id || p.id}`; }
 function shortCite(p) { return `《${p.title}》段${p.ordinal} · P${p.passage_id || p.id}`; }
+const ICON_TRASH = '<svg class="ico" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12h10l1-12M9 7V4h6v3"/></svg>';
+const ICON_EDIT = '<svg class="ico" viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16l-1 4z"/></svg>';
+function iconButton(svg, title, action) {
+  const b = el('button'); b.type = 'button'; b.title = title; b.setAttribute('aria-label', title); b.innerHTML = svg;
+  b.addEventListener('click', run(async event => { event.stopPropagation(); await action(); })); return b;
+}
+function autosize() { const t = $('chat-input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 180) + 'px'; }
+function setSidebar(open) { document.body.classList.toggle('side-closed', !open); try { localStorage.setItem('sidebar', open ? '1' : '0'); } catch (e) {} }
 function button(text, action) { const b = el('button', text); b.type = 'button'; b.addEventListener('click', run(action)); return b; }
 
 /* ---------- 来源 ---------- */
@@ -22,13 +34,16 @@ async function loadBooks() {
   $('book-filter').value = current;
   $('book-count').textContent = books.length ? `${books.length} 部 · ${books.reduce((n, b) => n + b.passages, 0)} 段` : '';
   $('book-list').replaceChildren();
+  if (!books.length) $('book-list').append(el('p', '还没有典籍，点“导入”添加。', 'empty muted'));
   books.forEach(b => {
-    const row = el('div', undefined, 'toolbar');
-    row.append(el('span', `${b.title}（${b.passages}段）`, 'citation'),
-      button('删除', async () => { if (!confirm(`删除《${b.title}》及其全部段落与关联笔记？此操作不可恢复。`)) return;
-        await api('book-delete', { id: b.id });
-        [...context.keys()].forEach(id => { const p = context.get(id); if (p.book_id === b.id || p.title === b.title) context.delete(id); });
-        updateContext(); await loadBooks(); await search(); status('典籍已删除。'); }));
+    const row = el('div', undefined, 'side-item'), acts = el('span', undefined, 'acts');
+    row.title = '在原文库中检索这部典籍';
+    row.addEventListener('click', run(async () => { $('book-filter').value = b.id; $('query').value = ''; selectTab('sources'); await search(); }));
+    acts.append(iconButton(ICON_TRASH, '删除典籍', async () => { if (!confirm(`删除《${b.title}》及其全部段落与关联笔记？此操作不可恢复。`)) return;
+      await api('book-delete', { id: b.id });
+      [...context.keys()].forEach(id => { const p = context.get(id); if (p.book_id === b.id || p.title === b.title) context.delete(id); });
+      updateContext(); await loadBooks(); await search(); status('典籍已删除。'); }));
+    row.append(el('span', b.title, 'name'), el('span', b.passages + '段', 'count'), acts);
     $('book-list').append(row);
   });
 }
@@ -40,12 +55,12 @@ async function search(reset = true) {
   $('results').replaceChildren();
   if (!result.items.length) $('results').append(el('p', '没有匹配的原文。', 'empty'));
   result.items.forEach(p => {
-    const card = el('article', undefined, 'passage');
+    const card = el('article', undefined, 'passage' + (context.has(p.id) ? ' picked' : ''));
     card.append(el('div', cite(p), 'citation'), highlight(p.text, result.highlight));
     const actions = el('div', undefined, 'toolbar');
     actions.append(
       button('查看全文', () => showSource(p)),
-      button('加入对话', () => { addContext(p); }),
+      button('加入对话', () => { addContext(p); card.classList.add('picked'); }),
       button('对照', () => { if (comparison.size >= 2 && !comparison.has(p.id)) throw new Error('对照区最多两段，请先移除一段。'); comparison.set(p.id, p); updateComparison(); }),
       button('写笔记', () => { addContext(p, true); selectTab('notes'); $('note-passage').value = p.id; $('note-body').focus(); }));
     card.append(actions); $('results').append(card);
@@ -71,7 +86,7 @@ function addContext(p, silent) {
 function updateContext() {
   $('context-count').textContent = context.size;
   $('context-chips').replaceChildren();
-  if (!context.size) $('context-chips').append(el('span', '在左侧检索结果中点“加入对话”。', 'muted'));
+  if (!context.size) $('context-chips').append(el('span', '点输入框左下角的“＋”选择依据原文。', 'muted'));
   context.forEach(p => {
     const chip = el('span', undefined, 'chip'); chip.append(button(shortCite(p),()=>showSource(p)));
     if (!currentConv) { const x = el('button', '✕'); x.title = '移除'; x.addEventListener('click', () => { context.delete(p.id); updateContext(); refreshNotePassages(); }); chip.append(x); }
@@ -83,24 +98,55 @@ function updateSuggestions() {
   $('suggestions').replaceChildren();
   if (currentConv) return;
   ['这些原文的核心论点是什么？', '关键术语在本段中的具体含义？', '各段表述之间有什么差异？'].forEach(q => {
-    const b = button(q, () => { $('chat-input').value = q; });
+    const b = button(q, () => { $('chat-input').value = q; autosize(); $('chat-input').focus(); });
     $('suggestions').append(b);
   });
 }
 
 /* ---------- 对话 ---------- */
-async function loadConversations() {
-  const rows = await api('conversations'), sel = $('conv-select'), cur = sel.value;
-  sel.replaceChildren(el('option', '＋ 新对话')); sel.firstChild.value = '';
-  rows.forEach(c => { const o = el('option', `${c.title}（${c.messages}条）`); o.value = c.id; sel.append(o); });
-  sel.value = [...sel.options].some(o => o.value === String(cur)) ? cur : '';
-  if (!sel.value) newConversation();
+let convRows = [];
+function updateTitle() { $('chat-title').textContent = currentConv ? currentConv.title : '新对话'; }
+async function loadConversations() { convRows = await api('conversations'); renderConversations(); }
+function renderConversations() {
+  const list = $('conv-list'); list.replaceChildren();
+  if (!convRows.length) list.append(el('p', '还没有对话。', 'empty muted'));
+  convRows.forEach(c => {
+    const row = el('div', undefined, 'side-item' + (currentConv && currentConv.id === c.id ? ' active' : '')), name = el('span', c.title, 'name');
+    row.title = c.title;
+    row.addEventListener('click', run(() => selectConversation(c.id)));
+    const rename = () => {
+      const input = el('input'); input.value = c.title; input.maxLength = 60; input.style.margin = '0'; input.setAttribute('aria-label', '对话名称');
+      let done = false;
+      const finish = run(async save => {
+        if (done) return; done = true;
+        const title = input.value.trim();
+        if (save && title && title !== c.title) {
+          await api('conversation-rename', { id: c.id, title });
+          if (currentConv && currentConv.id === c.id) { currentConv.title = title.slice(0, 60); updateTitle(); }
+        }
+        await loadConversations();
+      });
+      input.addEventListener('click', e => e.stopPropagation());
+      input.addEventListener('keydown', e => { if (e.isComposing) return; if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); });
+      input.addEventListener('blur', () => finish(true));
+      name.replaceWith(input); input.focus(); input.select();
+    };
+    const acts = el('span', undefined, 'acts');
+    acts.append(iconButton(ICON_EDIT, '重命名', rename),
+      iconButton(ICON_TRASH, '删除对话', async () => { if (!confirm(`删除对话“${c.title}”？`)) return;
+        await api('conversation-delete', { id: c.id }); if (currentConv && currentConv.id === c.id) newConversation();
+        await loadConversations(); status('对话已删除。'); }));
+    row.append(name, acts); list.append(row);
+  });
+}
+function showGreeting() {
+  const box = el('div', undefined, 'empty');
+  box.append(el('h2', '你好，想研读哪段佛典？', 'greeting'), el('p', '从原文出发，保留出处与疑问。', 'greeting-sub'),
+    el('p', '点输入框左下角的“＋”检索并选择依据原文，然后提问；回答只引用所选原文并标注 P编号。', 'muted'));
+  $('messages').replaceChildren(box);
 }
 function newConversation() {
-  currentConv = null; context.clear();
-  $('conv-select').value = ''; $('messages').replaceChildren();
-  $('messages').append(el('p', '选择左侧原文作为依据后，在下方提问。回答只引用所选原文并标注 P编号。', 'empty'));
-  updateContext();
+  currentConv = null; context.clear(); showGreeting(); updateTitle(); renderConversations(); updateContext();
 }
 async function selectConversation(id) {
   if (!id) { newConversation(); return; }
@@ -109,7 +155,7 @@ async function selectConversation(id) {
   data.conversation.context.forEach(p => context.set(p.id, p));
   $('messages').replaceChildren();
   data.messages.forEach(m => $('messages').append(renderMessage(m)));
-  updateContext(); scrollMessages();
+  updateTitle(); renderConversations(); updateContext(); scrollMessages();
   refreshNotePassages();
 }
 function renderMessage(m) {
@@ -117,9 +163,10 @@ function renderMessage(m) {
   div.append(el('div', m.role === 'user' ? '你' : 'AI 助手', 'who'), messageBody(m.body));
   if(m.role==='assistant') div.append(button('保存为笔记',async()=>{const first=[...context.values()][0];if(!first)throw new Error('当前没有关联原文。');await api('notes',{passage_id:first.id,kind:'AI 推断',body:m.body});await loadNotes();selectTab('notes');status('回答已保存为 AI 推断笔记。');}));
   (m.warnings || []).forEach(w => div.append(el('div', '⚠ ' + w, 'warn')));
-  div.append(el('div', m.created || '', 'time'));
+  div.append(el('div', formatTime(m.created), 'time'));
   return div;
 }
+function formatTime(iso) { const d = new Date(iso || ''); return isNaN(d) ? '' : d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 function scrollMessages() { $('messages').scrollTop = $('messages').scrollHeight; }
 async function sendChat() {
   if (chatBusy || aiBusy) return;
@@ -129,21 +176,22 @@ async function sendChat() {
   if (!aiConfig.model) { $('settings-dialog').showModal(); throw new Error('请先配置并保存 AI 接口。'); }
   chatBusy = true; setBusy(true);
   let succeeded=false;
+  $('messages').querySelector('.empty')?.remove();
   $('messages').append(renderMessage({ role: 'user', body: text }));
   scrollMessages(); status('AI 正在回答…');
-  const thinking = el('div', undefined, 'msg assistant'); thinking.append(el('div', 'AI 助手', 'who'), el('div', '思考中…', 'body')); $('messages').append(thinking); scrollMessages();
+  const thinking = el('div', undefined, 'msg assistant thinking'); thinking.append(el('div', 'AI 助手', 'who'), el('div', '正在研读所选原文', 'body')); $('messages').append(thinking); scrollMessages();
   try {
     const payload = currentConv ? { conversation_id: currentConv.id, message: text } : { ids: [...context.keys()], message: text };
     const r = await api('chat', payload);
     thinking.remove();succeeded=true;
     $('messages').append(renderMessage({ role: 'assistant', body: r.text, warnings: r.warnings }));
-    scrollMessages(); $('chat-input').value = ''; status('回答已保存到本次对话。');
-    await loadConversations(); $('conv-select').value = String(r.conversation_id); await selectConversation(r.conversation_id);
-  } finally { thinking.remove();chatBusy = false;setBusy(false); if(!succeeded){const pending=$('messages').querySelector('.msg.user:last-of-type');if(pending)pending.remove();status('请求失败，问题仍保留，可重试。',true);} }
+    scrollMessages(); $('chat-input').value = ''; autosize(); status('回答已保存到本次对话。');
+    await loadConversations(); await selectConversation(r.conversation_id);
+  } finally { thinking.remove();chatBusy = false;setBusy(false); if(!succeeded){const pending=$('messages').querySelector('.msg.user:last-of-type');if(pending)pending.remove();if(!currentConv&&!$('messages').children.length)showGreeting();status('请求失败，问题仍保留，可重试。',true);} }
 }
 
 /* ---------- 右栏：对照 / 笔记 / 分析 ---------- */
-function selectTab(name) { document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name)); ['compare', 'notes', 'analyses'].forEach(t => $('tab-' + t).hidden = t !== name); }
+function selectTab(name) { $('drawer').hidden = false; document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name)); ['sources', 'compare', 'notes', 'analyses'].forEach(t => $('tab-' + t).hidden = t !== name); }
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => selectTab(b.dataset.tab)));
 function updateComparison() {
   $('comparison').replaceChildren();
@@ -202,10 +250,15 @@ $('book-filter').addEventListener('change', run(() => search()));
 $('fold-script').addEventListener('change', run(() => search()));
 $('previous').addEventListener('click', run(() => { offset = Math.max(0, offset - 100); return search(false); }));
 $('next').addEventListener('click', run(() => { offset += 100; return search(false); }));
-$('conv-select').addEventListener('change', run(e => selectConversation(e.target.value)));
-$('conv-delete').addEventListener('click', run(async () => { if (!currentConv) return; if (!confirm(`删除对话“${currentConv.title}”？`)) return; await api('conversation-delete', { id: currentConv.id }); await loadConversations(); status('对话已删除。'); }));
+$('new-chat').addEventListener('click', () => { newConversation(); $('chat-input').focus(); });
+$('toggle-sidebar').addEventListener('click', () => setSidebar(false));
+$('open-sidebar').addEventListener('click', () => setSidebar(true));
+$('open-drawer').addEventListener('click', () => { if ($('drawer').hidden) selectTab('sources'); else $('drawer').hidden = true; });
+$('add-source').addEventListener('click', () => { selectTab('sources'); $('query').focus(); });
+$('close-drawer').addEventListener('click', () => { $('drawer').hidden = true; });
+$('chat-input').addEventListener('input', autosize);
 $('send-chat').addEventListener('click', run(sendChat));
-$('chat-input').addEventListener('keydown', run(e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); return sendChat(); } }));
+$('chat-input').addEventListener('keydown', run(e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); return sendChat(); } }));
 $('btn-analyze').addEventListener('click', run(async () => {
   if (aiBusy || chatBusy) return; if (!context.size) throw new Error('请先在左侧选择依据原文。');
   if (!aiConfig.model) { $('settings-dialog').showModal(); throw new Error('请先配置并保存 AI 接口。'); }
@@ -245,11 +298,13 @@ $('btn-export-json').addEventListener('click', run(async () => download('researc
 run(async () => { token = (await api('session')).token; await loadNotebooks(); await loadBooks(); await search(); await loadNotes(); await loadAnalyses(); updateContext(); updateComparison(); newConversation(); await loadConversations(); await loadSettings(); })();
 
 function showSource(p){$('source-citation').textContent=cite(p);$('source-body').textContent=p.text;$('source-dialog').showModal();}
-function messageBody(text){const body=el('div',undefined,'body');const pattern=/\bP(\d+)\b/g;let start=0;for(const m of text.matchAll(pattern)){body.append(document.createTextNode(text.slice(start,m.index)));const p=context.get(Number(m[1]));body.append(p?button(m[0],()=>showSource(p)):document.createTextNode(m[0]));start=m.index+m[0].length;}body.append(document.createTextNode(text.slice(start)));return body;}
-function setBusy(busy){['notebook-select','new-notebook','conv-select','conv-delete','btn-import','book-filter','send-chat','btn-analyze'].forEach(id=>$(id).disabled=busy);}
+function citeButton(label,p){const b=button(label,()=>showSource(p));b.title=p.text.slice(0,120)+(p.text.length>120?'…':'');return b;}
+function messageBody(text){const body=el('div',undefined,'body');const pattern=/\bP(\d+)\b/g;let start=0;for(const m of text.matchAll(pattern)){body.append(document.createTextNode(text.slice(start,m.index)));const p=context.get(Number(m[1]));body.append(p?citeButton(m[0],p):document.createTextNode(m[0]));start=m.index+m[0].length;}body.append(document.createTextNode(text.slice(start)));return body;}
+function setBusy(busy){['notebook-select','new-notebook','new-chat','add-source','btn-import','book-filter','send-chat','btn-analyze'].forEach(id=>$(id).disabled=busy);}
 async function loadNotebooks(){const rows=await api('notebooks');if(!rows.some(r=>r.id===notebookId))notebookId='default';$('notebook-select').replaceChildren();rows.forEach(r=>{const o=el('option',r.name);o.value=r.id;$('notebook-select').append(o);});$('notebook-select').value=notebookId;}
 async function switchNotebook(id){if(chatBusy||aiBusy)throw new Error('请等待当前分析完成。');notebookId=id;localStorage.setItem('notebook',id);context.clear();comparison.clear();editingNote=null;lastResults=[];$('query').value='';$('book-filter').value='';$('note-cancel').click();$('chat-input').value='';$('analysis-question').value='';$('ai-result').replaceChildren();$('prompt').value='';newConversation();updateComparison();await loadBooks();await search();await loadNotes();await loadAnalyses();await loadConversations();status('已切换研究本。');}
 $('notebook-select').addEventListener('change',run(e=>switchNotebook(e.target.value)));
 $('new-notebook').addEventListener('click',()=>{$('notebook-dialog').showModal();$('notebook-name').focus();});
 $('notebook-form').addEventListener('submit',run(async e=>{e.preventDefault();const n=await api('notebook-create',{name:$('notebook-name').value});await loadNotebooks();await switchNotebook(n.id);$('notebook-select').value=n.id;$('notebook-dialog').close();$('notebook-name').value='';}));
 $('open-data').addEventListener('click',run(async()=>{if(window.pywebview?.api)await window.pywebview.api.open_data_folder();else status('源码模式的数据目录位于项目 data 文件夹。');}));
+try { if (localStorage.getItem('sidebar') === '0' || innerWidth < 860) setSidebar(false); } catch (e) {}
