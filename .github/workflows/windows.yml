@@ -26,7 +26,7 @@ jobs:
         run: |
           $p = Start-Process -FilePath dist/BuddhistTextLab/BuddhistTextLab.exe -ArgumentList '--smoke-test', 'smoke-result.txt' -PassThru
           if (-not $p.WaitForExit(90000)) { $p.Kill(); throw 'Executable smoke test timed out' }
-          if ($p.ExitCode -ne 0 -or -not (Test-Path smoke-result.txt)) { throw 'Executable smoke test failed' }
+          if ($p.ExitCode -ne 0 -or -not (Test-Path smoke-result.txt)) { Get-Content smoke-result.txt.log -ErrorAction SilentlyContinue; throw 'Executable smoke test failed' }
           Get-Content smoke-result.txt
       - name: Install Inno Setup
         shell: pwsh
@@ -68,7 +68,7 @@ jobs:
           if (-not (Test-Path $shortcut)) { throw 'Start menu shortcut missing' }
           $p = Start-Process $exe -ArgumentList '--gui-smoke-test', "$env:RUNNER_TEMP/gui-smoke.txt" -PassThru
           if (-not $p.WaitForExit(90000)) { $p.Kill(); throw 'Native GUI test timed out' }
-          if ($p.ExitCode -ne 0 -or -not (Test-Path "$env:RUNNER_TEMP/gui-smoke.txt")) { throw 'Native GUI test failed' }
+          if ($p.ExitCode -ne 0 -or -not (Test-Path "$env:RUNNER_TEMP/gui-smoke.txt")) { Get-Content "$env:RUNNER_TEMP/gui-smoke.txt.log" -ErrorAction SilentlyContinue; throw 'Native GUI test failed' }
           Get-Content "$env:RUNNER_TEMP/gui-smoke.txt"
           $p = Start-Process (Join-Path $dest 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
           if ($p.ExitCode -ne 0 -or (Test-Path $exe)) { throw 'Uninstall failed' }

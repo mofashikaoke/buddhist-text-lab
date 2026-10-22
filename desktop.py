@@ -16,11 +16,11 @@ def data_dir():
 
 class DesktopAPI:
     def __init__(self, folder):
-        self.folder = folder
-        self.window = None
+        self._folder = folder
+        self._window = None
 
     def open_data_folder(self):
-        os.startfile(str(self.folder))
+        os.startfile(str(self._folder))
         return True
 
     def save_text(self, name, text):
@@ -28,7 +28,7 @@ class DesktopAPI:
         if not isinstance(text, str) or len(text) > 80 * 1024 * 1024:
             raise ValueError('导出内容超出上限。')
         filename = Path(name).name
-        paths = self.window.create_file_dialog(webview.FileDialog.SAVE, save_filename=filename)
+        paths = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=filename)
         if not paths:
             return {'saved': False}
         path = paths if isinstance(paths, str) else paths[0]
@@ -42,7 +42,7 @@ def run_window(server, folder, smoke_output=None):
     window = webview.create_window('佛典研究工作台', f'http://127.0.0.1:{server.server_port}',
                                    js_api=api, width=1480, height=960, min_size=(1100, 720),
                                    background_color='#f6f4ee', text_select=True)
-    api.window = window
+    api._window = window
     errors = []
     def verify():
         if not smoke_output:
@@ -101,7 +101,30 @@ def smoke_test(output, gui=False):
 def main():
     for flag, gui in [('--smoke-test', False), ('--gui-smoke-test', True)]:
         if flag in sys.argv:
-            smoke_test(sys.argv[sys.argv.index(flag) + 1], gui)
+            output = Path(sys.argv[sys.argv.index(flag) + 1])
+            log = open(str(output) + '.log', 'w', encoding='utf-8', buffering=1)
+            sys.stdout = sys.stderr = log
+            import logging
+            logging.basicConfig(stream=log, level=logging.DEBUG)
+            def timed_out():
+                import traceback
+                for tid, frame in sys._current_frames().items():
+                    log.write(f'\nTHREAD {tid}\n')
+                    traceback.print_stack(frame, file=log)
+                log.flush()
+                os._exit(2)
+            timer = threading.Timer(50, timed_out)
+            timer.daemon = True
+            timer.start()
+            try:
+                smoke_test(str(output), gui)
+            except Exception:
+                import traceback
+                traceback.print_exc(file=log)
+                log.flush()
+                os._exit(1)
+            finally:
+                timer.cancel()
             return
     folder = data_dir()
     folder.mkdir(parents=True, exist_ok=True)
