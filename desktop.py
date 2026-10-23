@@ -76,7 +76,8 @@ def smoke_test(output, gui=False):
     from ai import protect_key
     if os.name == 'nt':
         assert protect_key(protect_key(b'smoke-test'), True) == b'smoke-test'
-    with tempfile.TemporaryDirectory() as tmp:
+    # WebView2 may still be writing its profile when the window closes; ignore cleanup races.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         folder = Path(tmp)
         server = create_server(str(folder / 'research.sqlite3'))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
