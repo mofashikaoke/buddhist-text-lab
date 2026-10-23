@@ -51,7 +51,7 @@ def run_window(server, folder, smoke_output=None):
             # loaded means renderer is ready; app bootstrap may still be fetching data.
             ready = False
             for _ in range(100):
-                ready = window.evaluate_js("Boolean(document.getElementById('send-chat') && document.getElementById('notebook-select').options.length && window.pywebview && window.pywebview.api.save_text)")
+                ready = window.evaluate_js("Boolean(document.querySelectorAll('#nb-grid .nb-card').length >= 2 && document.getElementById('send-chat') && window.pywebview && window.pywebview.api.save_text)")
                 if ready:
                     break
                 time.sleep(0.1)

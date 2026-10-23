@@ -21,8 +21,10 @@ def validate_url(value):
         raise ValueError('请输入不含账号、参数和片段的 API 基础地址。')
     if u.scheme == 'http' and u.hostname not in ('localhost', '127.0.0.1', '::1'):
         raise ValueError('远程接口必须使用 HTTPS；本机服务可使用 HTTP。')
-    if u.path.endswith('/chat/completions'):
-        value = value[:-len('/chat/completions')]
+    for suffix in ('/chat/completions', '/messages'):
+        # Accept a pasted endpoint URL as well as the base URL.
+        if u.path.endswith(suffix):
+            value = value[:-len(suffix)]
     return value
 
 

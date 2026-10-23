@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -7,8 +8,16 @@ import urllib.request
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 
-from core import Library, citation, research_prompt
+from core import (Library, STUDIO_KINDS, chat_messages, citation, conversations_markdown, notes_markdown,
+                  research_prompt, studio_prompt)
 from server import Handler, TOKEN
+
+
+def long_corpus(lib, passages=60):
+    """A source far larger than the retrieval budget; passage i mentions its own unique term."""
+    filler = '如是我闻一时佛在舍卫国祇树给孤独园与大比丘众千二百五十人俱。' * 20
+    text = '\n\n'.join(f'第{i}章 专名{i:03d}独有。' + filler for i in range(passages))
+    lib.import_book('big.txt', text.encode(), '大部典籍')
 
 
 class ResearchTests(unittest.TestCase):
@@ -56,7 +65,7 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual('\n'.join(p['text'] for p in items), '\n'.join(lines))
         sentences = ''.join(f'句{i}' + '文' * 100 + '。' for i in range(40))
         self.lib.import_book('one.txt', sentences.encode(), '单行文本')
-        pieces = [p['text'] for p in self.lib.passages(book_id=self.lib.books()[0]['id'])['items']]
+        pieces = [p['text'] for p in self.lib.passages(book_id=self.lib.books()[-1]['id'])['items']]
         self.assertGreater(len(pieces), 1)
         self.assertEqual(''.join(pieces), sentences)
         self.assertTrue(all(len(t) <= 1500 for t in pieces))
@@ -65,30 +74,6 @@ class ResearchTests(unittest.TestCase):
         self.lib.import_book('s.txt', '如实保留\n原文。'.encode(), '短文')
         self.assertEqual([p['text'] for p in self.lib.passages()['items']], ['如实保留\n原文。'])
 
-    def test_notes_persist_and_reference_original(self):
-        self.lib.import_book('test.md', '测试原文'.encode(), '测试典籍')
-        p = self.lib.passages()['items'][0]
-        self.lib.add_note(p['id'], '待核查', '需要核查版本。')
-        self.lib.close()
-        self.lib = Library(self.path)
-        n = self.lib.notes()[0]
-        self.assertEqual(n['text'], '测试原文')
-        self.assertIn('文本无页码', citation(n))
-        self.assertIn(f"P{p['id']}", citation(n))
-        self.assertEqual(len(self.lib.backup()['notes']), 1)
-        with self.assertRaises(ValueError):
-            self.lib.add_note(999, '个人笔记', '不存在')
-        with self.assertRaises(ValueError):
-            self.lib.add_note(p['id'], '原文', '不能把笔记伪装成原文')
-
-    def test_prompt_preserves_evidence(self):
-        self.lib.import_book('test.txt', '如实保留\n原文。'.encode(), '测试')
-        p = self.lib.passages()['items'][0]
-        prompt = research_prompt([p], '分析其前提')
-        self.assertIn(p['text'], prompt)
-        self.assertIn('证据不足', prompt)
-        self.assertIn('分析其前提', prompt)
-
     def test_empty_and_gb18030(self):
         with self.assertRaises(ValueError):
             self.lib.import_book('empty.txt', b' \n\n ', '空文本')
@@ -96,48 +81,194 @@ class ResearchTests(unittest.TestCase):
         self.lib.import_book('gb.txt', '中文测试'.encode('gb18030'), '编码测试')
         self.assertEqual(self.lib.passages()['items'][0]['text'], '中文测试')
 
-    def test_conversation_grounding_flow(self):
-        self.lib.import_book('test.txt', '第一段原文。\n\n第二段原文。'.encode(), '测试典籍')
-        pids = [p['id'] for p in self.lib.passages()['items']]
+    # ---- sources on/off and grounding ------------------------------------
+    def test_enable_disable_sources(self):
+        a = self.lib.import_book('a.txt', '甲书内容'.encode(), '甲')['id']
+        b = self.lib.import_book('b.txt', '乙书内容'.encode(), '乙')['id']
+        self.assertEqual([x['enabled'] for x in self.lib.books()], [1, 1])
+        self.lib.set_enabled(a, False)
+        self.assertEqual(self.lib.enabled_book_ids(), [b])
+        self.assertEqual([p['title'] for p in self.lib.retrieve('内容')['passages']], ['乙'])
+        self.lib.set_enabled(None, False)
         with self.assertRaises(ValueError):
-            self.lib.create_conversation('空', [], 'm', 'http://127.0.0.1:1')
-        conv = self.lib.create_conversation('', pids, 'test-model', 'http://127.0.0.1:1')
-        self.assertIn('测试典籍', conv['title'])
-        self.assertEqual(len(self.lib.list_conversations()), 1)
+            self.lib.retrieve('内容')
+        self.lib.set_enabled(None, True)
+        self.assertEqual(len(self.lib.enabled_book_ids()), 2)
+        with self.assertRaises(ValueError):
+            self.lib.set_enabled(999, True)
+
+    def test_small_sources_are_used_whole(self):
+        self.lib.import_book('t.txt', '第一段。\n\n第二段。\n\n第三段。'.encode(), '小典籍')
+        got = self.lib.retrieve('任意问题')
+        self.assertEqual(got['mode'], 'all')
+        self.assertEqual([p['text'] for p in got['passages']], ['第一段。', '第二段。', '第三段。'])
+
+    def test_large_sources_are_retrieved_by_question(self):
+        long_corpus(self.lib)
+        got = self.lib.retrieve('专名042独有是什么意思')
+        self.assertEqual(got['mode'], 'mixed')  # one real match, the rest spread across the source
+        self.assertLessEqual(len(got['passages']), 12)
+        self.assertLessEqual(sum(len(p['text']) for p in got['passages']), 30000 + 1500)
+        self.assertEqual([p['ordinal'] for p in got['passages'] if '专名042' in p['text']], [43])
+        ordinals = [p['ordinal'] for p in got['passages']]
+        self.assertEqual(ordinals, sorted(ordinals))
+
+    def test_unmatched_question_falls_back_to_spread_sample(self):
+        long_corpus(self.lib)
+        got = self.lib.retrieve('zzzz')
+        self.assertEqual(got['mode'], 'sample')
+        ords = [p['ordinal'] for p in got['passages']]
+        self.assertGreater(len(ords), 3)
+        self.assertGreater(ords[-1] - ords[0], 30)
+        studio = self.lib.sample()
+        self.assertEqual(studio['mode'], 'sample')
+        self.assertEqual(studio['total'], 60)
+
+    # ---- notes ---------------------------------------------------------------
+    def test_notes_are_free_standing_snapshots(self):
+        self.lib.import_book('test.md', '测试原文'.encode(), '测试典籍')
+        p = self.lib.passages()['items'][0]
+        free = self.lib.add_note('随想', '个人笔记', '没有引用的笔记。')
+        cited = self.lib.add_note('', '待核查', '需要核查版本。', [p['id'], p['id']])
+        self.lib.close()
+        self.lib = Library(self.path)
+        notes = {n['id']: n for n in self.lib.notes()}
+        self.assertEqual(notes[free]['evidence'], [])
+        self.assertEqual(len(notes[cited]['evidence']), 1)
+        self.assertIn('文本无页码', citation(notes[cited]['evidence'][0]))
+        with self.assertRaises(ValueError):
+            self.lib.add_note('', '原文', '不能把笔记伪装成原文')
+        with self.assertRaises(ValueError):
+            self.lib.add_note('', '个人笔记', '  ')
+        with self.assertRaises(ValueError):
+            self.lib.add_note('', '个人笔记', '引用不存在', [999])
+        self.lib.delete_book(self.lib.books()[0]['id'])
+        self.assertEqual(self.lib.passages()['total'], 0)
+        kept = [n for n in self.lib.notes() if n['id'] == cited][0]
+        self.assertEqual(kept['evidence'][0]['text'], '测试原文')
+        self.assertEqual(len(self.lib.backup()['notes']), 2)
+
+    def test_note_update_and_delete(self):
+        nid = self.lib.add_note('初', '个人笔记', '初版')
+        self.lib.update_note(nid, '修订', '待核查', '修订版')
+        n = self.lib.notes()[0]
+        self.assertEqual((n['title'], n['kind'], n['body']), ('修订', '待核查', '修订版'))
+        self.lib.delete_note(nid)
+        self.assertEqual(self.lib.notes(), [])
+        with self.assertRaises(ValueError):
+            self.lib.delete_note(999)
+        with self.assertRaises(ValueError):
+            self.lib.update_note(999, '', '个人笔记', 'x')
+        with self.assertRaises(ValueError):
+            self.lib.delete_book(999)
+
+    # ---- conversations -------------------------------------------------------
+    def test_conversation_flow_keeps_per_message_evidence(self):
+        self.lib.import_book('test.txt', '第一段原文。\n\n第二段原文。'.encode(), '测试典籍')
+        passages = self.lib.retrieve('问')['passages']
+        conv = self.lib.create_conversation('', 'test-model', 'http://127.0.0.1:1')
+        self.assertEqual(conv['title'], '新对话')
         self.lib.add_message(conv['id'], 'user', '核心论点是什么？')
-        self.lib.add_message(conv['id'], 'assistant', '依据 P1……', ['编号检查仅确认引用是否来自所选材料；引文准确性和推理仍需核查。'])
+        self.lib.add_message(conv['id'], 'assistant', '依据 P1……', ['警告'], passages)
         got = self.lib.get_conversation(conv['id'])
         self.assertEqual(len(got['messages']), 2)
-        self.assertEqual(len(got['conversation']['context']), 2)
-        self.assertEqual(got['messages'][1]['warnings'][0][:2], '编号')
+        self.assertEqual(got['messages'][0]['evidence'], [])
+        self.assertEqual([p['text'] for p in got['messages'][1]['evidence']], ['第一段原文。', '第二段原文。'])
+        self.assertEqual(got['messages'][1]['warnings'], ['警告'])
         self.assertEqual(self.lib.rename_conversation(conv['id'], '  般若研读  ')['title'], '般若研读')
-        self.assertEqual(self.lib.get_conversation(conv['id'])['conversation']['title'], '般若研读')
+        self.assertEqual(self.lib.list_conversations()[0]['messages'], 2)
         with self.assertRaises(ValueError):
             self.lib.rename_conversation(conv['id'], '   ')
         with self.assertRaises(ValueError):
             self.lib.rename_conversation(999, '不存在')
+        self.lib.delete_book(self.lib.books()[0]['id'])
+        self.assertEqual(len(self.lib.get_conversation(conv['id'])['messages'][1]['evidence']), 2)
         self.lib.delete_conversation(conv['id'])
         self.assertEqual(self.lib.list_conversations(), [])
         with self.assertRaises(ValueError):
             self.lib.get_conversation(conv['id'])
 
-    def test_note_update_delete_and_book_delete(self):
-        self.lib.import_book('test.txt', '原文段落'.encode(), '测试典籍')
+    def test_prompts_preserve_evidence(self):
+        self.lib.import_book('test.txt', '如实保留\n原文。'.encode(), '测试')
         p = self.lib.passages()['items'][0]
-        nid = self.lib.add_note(p['id'], '个人笔记', '初版')
-        self.lib.update_note(nid, '待核查', '修订版')
-        self.assertEqual(self.lib.notes()[0]['body'], '修订版')
-        self.lib.delete_note(nid)
-        self.assertEqual(self.lib.notes(), [])
+        prompt = research_prompt([p], '分析其前提')
+        self.assertIn(p['text'], prompt)
+        self.assertIn('证据不足', prompt)
+        self.assertIn('分析其前提', prompt)
+        for kind in STUDIO_KINDS:
+            text = studio_prompt(kind, [p], '问题')
+            self.assertIn(p['text'], text)
+            self.assertIn('证据不足', text)
         with self.assertRaises(ValueError):
-            self.lib.delete_note(999)
-        nid = self.lib.add_note(p['id'], '个人笔记', '随书删除')
-        self.lib.delete_book(self.lib.books()[0]['id'])
-        self.assertEqual(self.lib.books(), [])
-        self.assertEqual(self.lib.passages()['total'], 0)
-        self.assertEqual(self.lib.notes(), [])
+            studio_prompt('unknown', [p])
         with self.assertRaises(ValueError):
-            self.lib.delete_book(999)
+            studio_prompt('summary', [])
+        messages = chat_messages([p], [('user', '前一问'), ('assistant', '前一答')], '新问')
+        self.assertEqual([m['role'] for m in messages], ['system', 'user', 'assistant', 'user'])
+        self.assertIn(p['text'], messages[0]['content'])
+
+    def test_exports_include_cited_text(self):
+        self.lib.import_book('test.txt', '被引用的原文。'.encode(), '测试典籍')
+        passages = self.lib.retrieve('问')['passages']
+        self.lib.add_note('标题', 'AI 推断', '结论 P1', [passages[0]['id']], warnings=['需核查'])
+        conv = self.lib.create_conversation('对话', 'm', 'e')
+        self.lib.add_message(conv['id'], 'assistant', '回答 P1', (), passages)
+        notes_md = notes_markdown(self.lib.notes())
+        convs_md = conversations_markdown([self.lib.get_conversation(conv['id'])])
+        for md in (notes_md, convs_md):
+            self.assertIn('被引用的原文。', md)
+        self.assertIn('需核查', notes_md)
+
+    # ---- migration -------------------------------------------------------------
+    def test_v3_database_is_migrated_and_backed_up(self):
+        old = str(Path(self.tmp.name) / 'old.sqlite3')
+        db = sqlite3.connect(old)
+        db.executescript('''
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT NOT NULL, author TEXT NOT NULL,
+          edition TEXT NOT NULL, filename TEXT NOT NULL, digest TEXT UNIQUE NOT NULL);
+        CREATE TABLE passages (id INTEGER PRIMARY KEY, book_id INTEGER NOT NULL REFERENCES books(id),
+          page INTEGER NOT NULL, ordinal INTEGER NOT NULL, text TEXT NOT NULL);
+        CREATE TABLE notes (id INTEGER PRIMARY KEY, passage_id INTEGER NOT NULL REFERENCES passages(id),
+          kind TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z');
+        CREATE TABLE analyses (id INTEGER PRIMARY KEY, question TEXT NOT NULL, evidence TEXT NOT NULL,
+          model TEXT NOT NULL, endpoint TEXT NOT NULL, body TEXT NOT NULL, warnings TEXT NOT NULL,
+          usage TEXT NOT NULL, created TEXT NOT NULL DEFAULT '2026-01-02T00:00:00Z');
+        CREATE TABLE conversations (id INTEGER PRIMARY KEY, title TEXT NOT NULL, context TEXT NOT NULL,
+          model TEXT NOT NULL, endpoint TEXT NOT NULL, created TEXT NOT NULL DEFAULT '2026-01-03T00:00:00Z');
+        CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL
+          REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL, body TEXT NOT NULL,
+          warnings TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL DEFAULT '2026-01-03T00:00:01Z');
+        INSERT INTO books VALUES (1,'旧典籍','作者','版本','a.txt','digest1');
+        INSERT INTO passages VALUES (1,1,0,1,'旧原文。');
+        INSERT INTO notes(id,passage_id,kind,body) VALUES (1,1,'个人笔记','旧笔记');
+        INSERT INTO analyses(id,question,evidence,model,endpoint,body,warnings,usage)
+          VALUES (1,'旧问题','[{"id":1,"title":"旧典籍","author":"作者","edition":"版本","page":0,"ordinal":1,"text":"旧原文。"}]','m','e','旧分析','["旧警告"]','{}');
+        INSERT INTO conversations(id,title,context,model,endpoint) VALUES (1,'旧对话','[]','m','e');
+        INSERT INTO messages(conversation_id,role,body) VALUES (1,'user','旧问');
+        ''')
+        db.commit()
+        db.close()
+        lib = Library(old)
+        try:
+            self.assertEqual(lib.db.execute('PRAGMA user_version').fetchone()[0], 4)
+            self.assertEqual(lib.books()[0]['enabled'], 1)
+            notes = lib.notes()
+            self.assertEqual(sorted(n['origin'] for n in notes), ['analysis', 'manual'])
+            manual = [n for n in notes if n['origin'] == 'manual'][0]
+            self.assertEqual(manual['body'], '旧笔记')
+            self.assertEqual(manual['created'], '2026-01-01T00:00:00Z')
+            self.assertEqual(manual['evidence'][0]['text'], '旧原文。')
+            analysis = [n for n in notes if n['origin'] == 'analysis'][0]
+            self.assertEqual((analysis['title'], analysis['body'], analysis['warnings']), ('旧问题', '旧分析', ['旧警告']))
+            self.assertEqual(lib.get_conversation(1)['messages'][0]['evidence'], [])
+            self.assertTrue(Path(old + '.v3.bak').exists())
+        finally:
+            lib.close()
+        again = Library(old)
+        try:
+            self.assertEqual(len(again.notes()), 2)
+        finally:
+            again.close()
 
     def test_http_and_request_protection(self):
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -154,7 +285,7 @@ class ResearchTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as cm:
                 urllib.request.urlopen(req)
             self.assertEqual(cm.exception.code, 403)
-            req = urllib.request.Request(base + '/api/prompt', b'{"ids":[]}',
+            req = urllib.request.Request(base + '/api/prompt', '{"question":"问"}'.encode(),
                                           headers={'X-Research-Token': TOKEN}, method='POST')
             with self.assertRaises(urllib.error.HTTPError) as cm:
                 urllib.request.urlopen(req)

@@ -4,19 +4,40 @@ import base64
 import binascii
 import json
 import os
+import re
 import secrets
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from core import Library, notes_markdown, analyses_markdown, research_prompt, chat_messages, conversations_markdown
+from core import (Library, STUDIO_KINDS, notes_markdown, studio_prompt, chat_messages,
+                  conversations_markdown)
 from notebooks import Notebooks
 from ai import Settings, complete, complete_messages, citation_warnings
 
 ROOT = Path(__file__).parent
 TOKEN = secrets.token_urlsafe(32)
 MAX_BODY = 40 * 1024 * 1024
+GROUNDING_LABEL = {'search': '按问题检索', 'mixed': '检索加均匀抽样', 'sample': '均匀抽样'}
+
+
+def grounding_note(grounding):
+    """A warning stored with answers that did not use every passage of the enabled sources."""
+    if grounding['mode'] == 'all':
+        return None
+    return (f"来源较长，本次依据{GROUNDING_LABEL[grounding['mode']]}选出的 "
+            f"{len(grounding['passages'])}/{grounding['total']} 段原文；未选入的段落没有参与回答。")
+
+
+def merge_passages(*groups):
+    seen, merged = set(), []
+    for group in groups:
+        for p in group:
+            if p['id'] not in seen:
+                seen.add(p['id'])
+                merged.append(p)
+    return merged
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -34,6 +55,11 @@ class Handler(BaseHTTPRequestHandler):
     def trusted_host(self):
         return self.headers.get('Host') in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}')
 
+    def library(self):
+        notebook = self.headers.get('X-Notebook-ID', 'default')
+        return Library(self.server.notebooks.path(notebook) if hasattr(self.server, 'notebooks')
+                       else self.server.db_path)
+
     def do_GET(self):
         if not self.trusted_host():
             return self.respond(403, {'error': '只接受本机访问。'})
@@ -44,45 +70,41 @@ class Handler(BaseHTTPRequestHandler):
         if route.path in static:
             name, mime = static[route.path]
             return self.respond(200, (ROOT / 'web' / name).read_bytes(), mime)
-        if route.path == '/api/session':
-            return self.respond(200, {'token': TOKEN})
-        if route.path == '/api/notebooks':
-            return self.respond(200, self.server.notebooks.list())
-        lib = None
         try:
-            lib = Library(self.server.notebooks.path(self.headers.get('X-Notebook-ID', 'default'))
-                          if hasattr(self.server, 'notebooks') else self.server.db_path)
-            q = parse_qs(route.query)
+            if route.path == '/api/session':
+                return self.respond(200, {'token': TOKEN})
             if route.path == '/api/notebooks':
-                data = self.server.notebooks.list()
-            elif route.path == '/api/books':
-                data = lib.books()
-            elif route.path == '/api/passages':
-                data = lib.passages(q.get('book', [None])[0], q.get('q', [''])[0],
-                                    100, max(0, int(q.get('offset', ['0'])[0])),
-                                    q.get('fold', ['0'])[0] == '1')
-            elif route.path == '/api/notes':
-                data = lib.notes()
-            elif route.path == '/api/conversations':
-                data = lib.list_conversations()
-            elif route.path == '/api/conversation':
-                data = lib.get_conversation(int(q.get('id', ['0'])[0]))
-            elif route.path == '/api/analyses':
-                data = lib.analyses()
-            elif route.path == '/api/settings':
-                data = self.server.ai_settings.public()
-            elif route.path == '/api/export':
-                convs = [lib.get_conversation(c['id']) for c in lib.list_conversations()]
-                data = {'markdown': notes_markdown(lib.notes()) + analyses_markdown(lib.analyses())
-                        + conversations_markdown(convs), 'backup': lib.backup()}
-            else:
-                return self.respond(404, {'error': '页面不存在。'})
-            self.respond(200, data)
+                return self.respond(200, self.server.notebooks.overview())
+            if route.path == '/api/settings':
+                return self.respond(200, self.server.ai_settings.public())
+            lib = self.library()
+            try:
+                q = parse_qs(route.query)
+                if route.path == '/api/books':
+                    data = lib.books()
+                elif route.path == '/api/passages':
+                    data = lib.passages(q.get('book', [None])[0], q.get('q', [''])[0],
+                                        100, max(0, int(q.get('offset', ['0'])[0])),
+                                        q.get('fold', ['0'])[0] == '1')
+                elif route.path == '/api/notes':
+                    data = lib.notes()
+                elif route.path == '/api/conversations':
+                    data = lib.list_conversations()
+                elif route.path == '/api/conversation':
+                    data = lib.get_conversation(int(q.get('id', ['0'])[0]))
+                elif route.path == '/api/export':
+                    convs = [lib.get_conversation(c['id']) for c in lib.list_conversations()]
+                    data = {'markdown': notes_markdown(lib.notes()) + conversations_markdown(convs),
+                            'backup': lib.backup()}
+                else:
+                    return self.respond(404, {'error': '页面不存在。'})
+                self.respond(200, data)
+            finally:
+                lib.close()
         except (ValueError, TypeError) as exc:
             self.respond(400, {'error': str(exc)})
-        finally:
-            if lib:
-                lib.close()
+        except (sqlite3.Error, OSError):
+            self.respond(500, {'error': '本地数据库或文件操作失败，请重试。'})
 
     def do_POST(self):
         if not self.trusted_host() or self.headers.get('X-Research-Token') != TOKEN:
@@ -94,96 +116,137 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict):
                 raise ValueError('请求格式无效。')
-            lib = Library(self.server.notebooks.path(self.headers.get('X-Notebook-ID', 'default'))
-                          if hasattr(self.server, 'notebooks') else self.server.db_path)
+            if self.path.startswith('/api/notebook-'):
+                return self.respond(200, self.notebook_action(self.path, data))
+            if self.path == '/api/settings':
+                return self.respond(200, self.server.ai_settings.save(data))
+            if self.path == '/api/ai-test':
+                complete(self.server.ai_settings.snapshot(), '连接测试。请只回答：连接成功。')
+                return self.respond(200, {'message': '连接成功，模型已返回正文。'})
+            lib = self.library()
             try:
-                if self.path == '/api/notebook-create':
-                    result = self.server.notebooks.create(data.get('name', ''))
-                elif self.path == '/api/import':
-                    raw = base64.b64decode(data['data'], validate=True)
-                    if len(raw) > 25 * 1024 * 1024:
-                        raise ValueError('文件上限 25 MB。')
-                    result = lib.import_book(data['filename'], raw, data['title'],
-                                             data.get('author', ''), data.get('edition', ''))
-                elif self.path == '/api/notes':
-                    lib.add_note(data['passage_id'], data['kind'], data['body'])
-                    result = {'saved': True}
-                elif self.path == '/api/note-update':
-                    result = lib.update_note(data['id'], data['kind'], data['body'])
-                elif self.path == '/api/note-delete':
-                    result = lib.delete_note(data['id'])
-                elif self.path == '/api/book-delete':
-                    result = lib.delete_book(data['id'])
-                elif self.path == '/api/conversation-rename':
-                    result = lib.rename_conversation(data['id'], str(data.get('title', '')))
-                elif self.path == '/api/conversation-delete':
-                    result = lib.delete_conversation(data['id'])
-                elif self.path == '/api/chat':
-                    message = str(data.get('message', ''))
-                    if not message.strip():
-                        raise ValueError('请输入问题。')
-                    config = self.server.ai_settings.snapshot()
-                    cid = data.get('conversation_id')
-                    is_new = not cid
-                    if cid:
-                        conv = lib.get_conversation(int(cid))
-                        passages = conv['conversation']['context']
-                        history = [(m['role'], m['body']) for m in conv['messages']]
-                        cid = int(cid)
-                    else:
-                        ids = list(dict.fromkeys(data.get('ids', [])))
-                        created = lib.create_conversation(str(data.get('title', '')) or ' '.join(message.split())[:30], ids,
-                                                          config['model'], config['base_url'])
-                        cid = created['id']
-                        conv = lib.get_conversation(cid)
-                        passages = conv['conversation']['context']
-                        history = []
-                    try:
-                        result = complete_messages(config, chat_messages(passages, history, message))
-                    except Exception:
-                        if is_new:
-                            lib.delete_conversation(cid)  # do not leave an empty conversation behind
-                        raise
-                    warnings = citation_warnings(result['text'], passages)
-                    if result['finish_reason'] == 'length':
-                        warnings.insert(0, '模型输出因 token 上限而截断；本条回答不完整。')
-                    lib.add_message(cid, 'user', message)
-                    mid = lib.add_message(cid, 'assistant', result['text'], warnings)
-                    result = {'conversation_id': cid, 'message_id': mid, 'text': result['text'],
-                              'warnings': warnings, 'usage': result.get('usage', {})}
-                elif self.path == '/api/settings':
-                    result = self.server.ai_settings.save(data)
-                elif self.path == '/api/ai-test':
-                    config = self.server.ai_settings.snapshot()
-                    complete(config, '连接测试。请只回答：连接成功。')
-                    result = {'message': '连接成功，模型已返回正文。'}
-                elif self.path in ('/api/prompt', '/api/analyze'):
-                    ids = list(dict.fromkeys(data['ids']))
-                    if not 1 <= len(ids) <= 20:
-                        raise ValueError('一次选择 1—20 段原文。')
-                    passages = [lib.passage(i) for i in ids]
-                    question = str(data.get('question', ''))
-                    prompt = research_prompt(passages, question)
-                    if self.path == '/api/prompt':
-                        result = {'prompt': prompt}
-                    else:
-                        config = self.server.ai_settings.snapshot()
-                        result = complete(config, prompt)
-                        warnings = citation_warnings(result['text'], passages)
-                        if result['finish_reason'] == 'length':
-                            warnings.insert(0, '模型输出因 token 上限而截断；本条分析不完整。')
-                        result['id'] = lib.save_analysis(question, passages, config['model'],
-                                                         config['base_url'], result, warnings)
-                        result['warnings'] = warnings
-                else:
-                    return self.respond(404, {'error': '操作不存在。'})
-                self.respond(200, result)
+                self.respond(200, self.library_action(lib, self.path, data))
             finally:
                 lib.close()
         except (ValueError, KeyError, TypeError, binascii.Error) as exc:
             self.respond(400, {'error': str(exc)})
         except (sqlite3.Error, OSError):
             self.respond(500, {'error': '本地数据库或文件操作失败，请重试。'})
+
+    def notebook_action(self, path, data):
+        books = self.server.notebooks
+        if path == '/api/notebook-create':
+            return books.create(data.get('name', ''))
+        if path == '/api/notebook-rename':
+            return books.rename(str(data['id']), data.get('name', ''))
+        if path == '/api/notebook-delete':
+            return books.delete(str(data['id']))
+        raise ValueError('操作不存在。')
+
+    def library_action(self, lib, path, data):
+        if path == '/api/import':
+            raw = base64.b64decode(data['data'], validate=True)
+            if len(raw) > 25 * 1024 * 1024:
+                raise ValueError('文件上限 25 MB。')
+            return lib.import_book(data['filename'], raw, data['title'], data.get('author', ''), data.get('edition', ''))
+        if path == '/api/book-enable':
+            return lib.set_enabled(data.get('id'), bool(data.get('enabled')))
+        if path == '/api/book-delete':
+            return lib.delete_book(data['id'])
+        if path == '/api/notes':
+            if data.get('message_id'):
+                return self.note_from_message(lib, data)
+            ids = data.get('passage_ids', [])
+            if not isinstance(ids, list):
+                raise ValueError('引用格式无效。')
+            nid = lib.add_note(data.get('title', ''), data['kind'], data['body'], ids)
+            return lib.note(nid)
+        if path == '/api/note-update':
+            lib.update_note(data['id'], data.get('title', ''), data['kind'], data['body'])
+            return lib.note(data['id'])
+        if path == '/api/note-delete':
+            return lib.delete_note(data['id'])
+        if path == '/api/conversation-rename':
+            return lib.rename_conversation(data['id'], str(data.get('title', '')))
+        if path == '/api/conversation-delete':
+            return lib.delete_conversation(data['id'])
+        if path == '/api/chat':
+            return self.chat(lib, data)
+        if path == '/api/studio':
+            return self.studio(lib, data)
+        if path == '/api/prompt':
+            kind = data.get('kind') or 'analysis'
+            question = str(data.get('question', ''))
+            grounding = lib.retrieve(question) if question.strip() else lib.sample()
+            return {'prompt': studio_prompt(kind, grounding['passages'], question),
+                    'passages': len(grounding['passages']), 'total': grounding['total']}
+        raise ValueError('操作不存在。')
+
+    def note_from_message(self, lib, data):
+        """Save a chat answer as a note, keeping the passages it actually cites."""
+        message = lib.message(data['message_id'])
+        if message['role'] != 'assistant':
+            raise ValueError('只能把 AI 回答保存为笔记。')
+        cited = {int(i) for i in re.findall(r'\bP(\d+)\b', message['body'])}
+        evidence = [p for p in message['evidence'] if p['id'] in cited] or message['evidence']
+        nid = lib.add_note_with_evidence(data.get('title', ''), 'AI 推断', message['body'], evidence,
+                                         'chat', message['warnings'])
+        return lib.note(nid)
+
+    def chat(self, lib, data):
+        message = str(data.get('message', ''))
+        if not message.strip():
+            raise ValueError('请输入问题。')
+        config = self.server.ai_settings.snapshot()
+        cid = data.get('conversation_id')
+        is_new = not cid
+        if cid:
+            cid = int(cid)
+            conv = lib.get_conversation(cid)
+            history = [(m['role'], m['body']) for m in conv['messages']]
+            pinned = conv['conversation']['context']
+        else:
+            title = str(data.get('title', '')) or ' '.join(message.split())[:30]
+            cid = lib.create_conversation(title, config['model'], config['base_url'])['id']
+            history, pinned = [], []
+        try:
+            grounding = lib.retrieve(message)
+            passages = merge_passages(pinned, grounding['passages'])
+            result = complete_messages(config, chat_messages(passages, history, message))
+        except Exception:
+            if is_new:
+                lib.delete_conversation(cid)  # do not leave an empty conversation behind
+            raise
+        warnings = citation_warnings(result['text'], passages)
+        if result['finish_reason'] == 'length':
+            warnings.insert(0, '模型输出因 token 上限而截断；本条回答不完整。')
+        note = grounding_note(grounding)
+        if note:
+            warnings.append(note)
+        lib.add_message(cid, 'user', message)
+        mid = lib.add_message(cid, 'assistant', result['text'], warnings, passages)
+        return {'conversation_id': cid, 'message_id': mid, 'text': result['text'], 'warnings': warnings,
+                'evidence': passages, 'usage': result.get('usage', {})}
+
+    def studio(self, lib, data):
+        kind = str(data.get('kind', ''))
+        if kind not in STUDIO_KINDS:
+            raise ValueError('不支持的 Studio 类型。')
+        question = str(data.get('question', ''))
+        if kind == 'analysis' and not question.strip():
+            raise ValueError('深度分析需要填写研究问题。')
+        grounding = lib.retrieve(question) if kind == 'analysis' else lib.sample()
+        prompt = studio_prompt(kind, grounding['passages'], question)
+        result = complete(self.server.ai_settings.snapshot(), prompt)
+        warnings = citation_warnings(result['text'], grounding['passages'])
+        if result['finish_reason'] == 'length':
+            warnings.insert(0, '模型输出因 token 上限而截断；本条产出不完整。')
+        note = grounding_note(grounding)
+        if note:
+            warnings.append(note)
+        title = STUDIO_KINDS[kind][0] + (f'：{question.strip()[:30]}' if kind == 'analysis' else '')
+        nid = lib.add_note_with_evidence(title, 'AI 推断', result['text'], grounding['passages'], 'studio', warnings)
+        return lib.note(nid)
 
     def log_message(self, fmt, *args):
         # Do not log search queries or uploaded text.

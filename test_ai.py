@@ -51,12 +51,39 @@ class AITests(unittest.TestCase):
         self.base = f'http://127.0.0.1:{self.model.server_port}'
         self.config = {'base_url': self.base, 'model': 'test-model', 'api_key': 'test-secret',
                        'max_tokens': 512, 'token_field': 'max_tokens'}
+        MockModel.received = None
 
     def tearDown(self):
         self.model.shutdown()
         self.model.server_close()
         self.thread.join()
         self.tmp.cleanup()
+
+    def start_app(self, books, settings=None):
+        """An app server over a database holding the given {title: text} sources."""
+        db = str(Path(self.tmp.name) / 'app.sqlite3')
+        lib = Library(db)
+        for title, text in books.items():
+            lib.import_book(title + '.txt', text.encode(), title)
+        lib.close()
+        app = create_server(db)
+        app.ai_settings.save(settings or self.config)
+        thread = threading.Thread(target=app.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (app.shutdown(), app.server_close(), thread.join()))
+        base = f'http://127.0.0.1:{app.server_port}'
+
+        def post(path, payload):
+            req = Request(base + path, json.dumps(payload).encode(),
+                          headers={'X-Research-Token': TOKEN, 'Content-Type': 'application/json'})
+            with urlopen(req) as r:
+                return json.load(r)
+
+        def get(path):
+            with urlopen(base + path) as r:
+                return json.load(r)
+
+        return db, post, get
 
     def test_transport_and_redacted_errors(self):
         result = complete(self.config, '测试问题')
@@ -73,30 +100,6 @@ class AITests(unittest.TestCase):
     def test_dropped_connection_becomes_value_error(self):
         with self.assertRaises(ValueError):
             complete({**self.config, 'base_url': self.base + '/reset'}, 'test')
-
-    def test_failed_first_chat_leaves_no_empty_conversation(self):
-        db = str(Path(self.tmp.name) / 'fail.sqlite3')
-        lib = Library(db)
-        lib.import_book('test.txt', '选中原文'.encode(), '测试典籍')
-        lib.close()
-        app = create_server(db)
-        app.ai_settings.save({**self.config, 'base_url': self.base + '/unauthorized'})
-        thread = threading.Thread(target=app.serve_forever, daemon=True)
-        thread.start()
-        try:
-            req = Request(f'http://127.0.0.1:{app.server_port}/api/chat',
-                          json.dumps({'ids': [1], 'message': '问'}).encode(),
-                          headers={'X-Research-Token': TOKEN, 'Content-Type': 'application/json'})
-            with self.assertRaises(HTTPError) as cm:
-                urlopen(req)
-            self.assertEqual(cm.exception.code, 400)
-            lib = Library(db)
-            self.assertEqual(lib.list_conversations(), [])
-            lib.close()
-        finally:
-            app.shutdown()
-            app.server_close()
-            thread.join()
 
     def test_settings_do_not_write_plaintext_and_destination_change_clears_key(self):
         path = Path(self.tmp.name) / 'ai-settings.json'
@@ -121,80 +124,102 @@ class AITests(unittest.TestCase):
         for url in ('http://remote.example/v1', 'https://user:pass@example.com/v1', 'https://example.com/v1?key=secret'):
             with self.assertRaises(ValueError):
                 validate_url(url)
+        for pasted in ('https://example.com/v1/chat/completions', 'https://example.com/v1/messages', 'https://example.com/v1/'):
+            self.assertEqual(validate_url(pasted), 'https://example.com/v1')
         warnings = citation_warnings('[P1] and [P99]', [{'id': 1}])
         self.assertTrue(any('P99' in w for w in warnings))
 
-    def test_chat_conversation_grounding_and_history(self):
-        db = str(Path(self.tmp.name) / 'chat.sqlite3')
+    # ---- chat grounded in the enabled sources ----------------------------------
+    def test_chat_uses_enabled_sources_only_and_keeps_history(self):
+        db, post, get = self.start_app({'甲书': '甲书的原文。', '乙书': '乙书没有启用的秘密段落。'})
+        post('/api/book-enable', {'id': 2, 'enabled': False})
+        first = post('/api/chat', {'message': '第一问'})
+        self.assertIn('P1', first['text'])
+        sent = MockModel.received['payload']['messages']
+        self.assertIn('甲书的原文', sent[0]['content'])
+        self.assertNotIn('秘密段落', sent[0]['content'])
+        self.assertEqual(sent[-1]['content'], '第一问')
+        self.assertEqual([p['title'] for p in first['evidence']], ['甲书'])
+        second = post('/api/chat', {'conversation_id': first['conversation_id'], 'message': '第二问'})
+        sent = MockModel.received['payload']['messages']
+        self.assertEqual([m['content'] for m in sent[-3:]], ['第一问', '原文支持此解释 [P1]。', '第二问'])
+        saved = get('/api/conversation?id=' + str(first['conversation_id']))
+        self.assertEqual(len(saved['messages']), 4)
+        self.assertEqual(saved['conversation']['title'], '第一问')
+        self.assertEqual(saved['messages'][1]['evidence'][0]['text'], '甲书的原文。')
+        self.assertTrue(any('编号' in w for m in saved['messages'] for w in m['warnings']))
+        post('/api/book-enable', {'id': None, 'enabled': True})
+        post('/api/chat', {'conversation_id': first['conversation_id'], 'message': '第三问'})
+        self.assertIn('秘密段落', MockModel.received['payload']['messages'][0]['content'])
         lib = Library(db)
-        lib.import_book('test.txt', '选中原文\n\n没有选取的秘密段落'.encode(), '测试典籍')
+        self.assertEqual(len(lib.list_conversations()), 1)
         lib.close()
-        app = create_server(db)
-        app.ai_settings.save(self.config)
-        thread = threading.Thread(target=app.serve_forever, daemon=True)
-        thread.start()
-        try:
-            def post(path, payload):
-                req = Request(f'http://127.0.0.1:{app.server_port}{path}',
-                              json.dumps(payload).encode(),
-                              headers={'X-Research-Token': TOKEN, 'Content-Type': 'application/json'})
-                with urlopen(req) as r:
-                    return json.load(r)
-            first = post('/api/chat', {'ids': [1], 'message': '第一问'})
-            self.assertIn('conversation_id', first)
-            with urlopen(f'http://127.0.0.1:{app.server_port}/api/conversations') as r:
-                self.assertEqual(json.load(r)[0]['title'], '第一问')
-            self.assertIn('P1', first['text'])
-            sent = MockModel.received['payload']['messages']
-            self.assertIn('选中原文', sent[0]['content'])
-            self.assertNotIn('没有选取的秘密段落', sent[0]['content'])
-            self.assertEqual(sent[-1]['content'], '第一问')
-            second = post('/api/chat', {'conversation_id': first['conversation_id'], 'message': '第二问'})
-            sent = MockModel.received['payload']['messages']
-            self.assertEqual(sent[-3]['content'], '第一问')
-            self.assertEqual(sent[-2]['content'], '原文支持此解释 [P1]。')
-            self.assertEqual(sent[-1]['content'], '第二问')
-            with urlopen(f'http://127.0.0.1:{app.server_port}/api/conversation?id=' + str(first['conversation_id'])) as r:
-                saved = json.load(r)
-            self.assertEqual(len(saved['messages']), 4)
-            self.assertTrue(any('P1' in w or '编号' in w for m in saved['messages'] for w in m['warnings']))
-            lib = Library(db)
-            self.assertEqual(len(lib.list_conversations()), 1)
-            lib.close()
-        finally:
-            app.shutdown()
-            app.server_close()
-            thread.join()
 
-    def test_full_analysis_saves_selected_evidence_only(self):
-        db = str(Path(self.tmp.name) / 'research.sqlite3')
+    def test_chat_without_enabled_sources_is_refused_and_leaves_nothing_behind(self):
+        db, post, get = self.start_app({'甲书': '甲书的原文。'})
+        post('/api/book-enable', {'id': None, 'enabled': False})
+        with self.assertRaises(HTTPError) as cm:
+            post('/api/chat', {'message': '问'})
+        self.assertEqual(cm.exception.code, 400)
+        self.assertEqual(get('/api/conversations'), [])
+        self.assertIsNone(MockModel.received)
+
+    def test_failed_first_chat_leaves_no_empty_conversation(self):
+        db, post, get = self.start_app({'甲书': '选中原文'}, {**self.config, 'base_url': self.base + '/unauthorized'})
+        with self.assertRaises(HTTPError) as cm:
+            post('/api/chat', {'message': '问'})
+        self.assertEqual(cm.exception.code, 400)
+        self.assertEqual(get('/api/conversations'), [])
+
+    def test_large_source_notes_that_only_part_was_used(self):
+        filler = '如是我闻一时佛在舍卫国祇树给孤独园。' * 40
+        text = '\n\n'.join(f'第{i}章 专名{i:03d}独有。' + filler for i in range(60))
+        db, post, get = self.start_app({'大部': text})
+        answer = post('/api/chat', {'message': '专名042独有讲了什么'})
+        self.assertTrue(any('检索' in w and '/60' in w for w in answer['warnings']))
+        sent = MockModel.received['payload']['messages'][0]['content']
+        self.assertIn('专名042', sent)
+        self.assertLess(len(answer['evidence']), 13)
+
+    def test_answer_can_be_saved_as_note_with_cited_evidence_only(self):
+        db, post, get = self.start_app({'甲书': '甲书第一段。\n\n甲书第二段。'})
+        answer = post('/api/chat', {'message': '问'})
+        note = post('/api/notes', {'message_id': answer['message_id'], 'title': '存档'})
+        self.assertEqual((note['kind'], note['origin'], note['title']), ('AI 推断', 'chat', '存档'))
+        self.assertEqual([p['id'] for p in note['evidence']], [1])  # the answer cites only P1
+        self.assertIn('P1', note['body'])
+        user_message = get('/api/conversation?id=' + str(answer['conversation_id']))['messages'][0]
+        with self.assertRaises(HTTPError):
+            post('/api/notes', {'message_id': user_message['id']})
+
+    # ---- Studio -----------------------------------------------------------------
+    def test_studio_outputs_are_saved_as_notes_with_snapshots(self):
+        db, post, get = self.start_app({'甲书': '甲书的原文。', '乙书': '乙书的原文。'})
+        post('/api/book-enable', {'id': 2, 'enabled': False})
+        note = post('/api/studio', {'kind': 'summary'})
+        self.assertEqual((note['title'], note['origin']), ('来源摘要', 'studio'))
+        self.assertEqual([p['title'] for p in note['evidence']], ['甲书'])
+        sent = MockModel.received['payload']['messages'][1]['content']
+        self.assertIn('甲书的原文', sent)
+        self.assertNotIn('乙书的原文', sent)
+        analysis = post('/api/studio', {'kind': 'analysis', 'question': '解释前提'})
+        self.assertIn('解释前提', analysis['title'])
+        self.assertIn('解释前提', MockModel.received['payload']['messages'][1]['content'])
+        self.assertEqual(len(get('/api/notes')), 2)
+        for bad in ({'kind': 'analysis', 'question': ' '}, {'kind': 'nope'}):
+            with self.assertRaises(HTTPError) as cm:
+                post('/api/studio', bad)
+            self.assertEqual(cm.exception.code, 400)
         lib = Library(db)
-        lib.import_book('test.txt', '选中原文\n\n没有选取的秘密段落'.encode(), '测试典籍')
+        self.assertNotIn('test-secret', json.dumps(lib.backup()))
         lib.close()
-        app = create_server(db)
-        app.ai_settings.save(self.config)
-        thread = threading.Thread(target=app.serve_forever, daemon=True)
-        thread.start()
-        try:
-            req = Request(f'http://127.0.0.1:{app.server_port}/api/analyze',
-                          json.dumps({'ids': [1], 'question': '解释前提'}).encode(),
-                          headers={'X-Research-Token': TOKEN, 'Content-Type': 'application/json'})
-            with urlopen(req) as r:
-                result = json.load(r)
-            self.assertEqual(result['id'], 1)
-            sent = MockModel.received['payload']['messages'][1]['content']
-            self.assertIn('选中原文', sent)
-            self.assertNotIn('没有选取的秘密段落', sent)
-            lib = Library(db)
-            saved = lib.analyses()[0]
-            self.assertEqual(len(saved['evidence']), 1)
-            self.assertEqual(saved['model'], 'test-model')
-            self.assertNotIn('test-secret', json.dumps(lib.backup()))
-            lib.close()
-        finally:
-            app.shutdown()
-            app.server_close()
-            thread.join()
+
+    def test_prompt_endpoint_needs_no_ai(self):
+        db, post, get = self.start_app({'甲书': '甲书的原文。'}, {**self.config, 'base_url': self.base + '/reset'})
+        result = post('/api/prompt', {'kind': 'glossary'})
+        self.assertIn('甲书的原文', result['prompt'])
+        self.assertEqual(result['passages'], 1)
+        self.assertIsNone(MockModel.received)
 
 
 if __name__ == '__main__':
