@@ -98,7 +98,8 @@
 <dialog id="settings-dialog"><form method="dialog"><button class="x" aria-label="关闭">✕</button></form>
 <h2>AI 接口设置</h2><button id="open-data" type="button">打开数据文件夹</button><p class="muted">支持 OpenAI 及兼容 Chat Completions 协议的接口。</p>
 <form id="settings-form"><label>API 基础地址<input id="api-base" type="url" required placeholder="https://api.openai.com/v1"></label>
-<label>模型名称<input id="api-model" required placeholder="填写账号可用的模型 ID"></label>
+<label>模型名称<input id="api-model" required list="model-list" placeholder="填写账号可用的模型 ID，或点下方“获取模型列表”"></label><datalist id="model-list"></datalist>
+<div class="toolbar"><button type="button" id="fetch-models">获取模型列表</button><select id="model-pick" hidden aria-label="选择模型"></select></div>
 <label>API Key<input id="api-key" type="password" autocomplete="off" placeholder="留空保留当前密钥；更换接口地址时需重新填写"></label>
 <div class="grid"><label>最大输出 token<input id="api-tokens" type="number" min="128" max="32768" required value="4096"></label>
 <label>输出参数格式<select id="api-token-field"><option value="max_completion_tokens">max_completion_tokens（OpenAI）</option><option value="max_tokens">max_tokens（部分兼容接口）</option></select></label></div>

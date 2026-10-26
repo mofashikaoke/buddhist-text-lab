@@ -86,6 +86,13 @@ class Settings:
         with self.lock:
             return {**self.config, 'api_key': self.key}
 
+    def models(self, data):
+        """List models for the destination in the form, without saving anything."""
+        base = validate_url(str(data.get('base_url', '')))
+        with self.lock:
+            key = str(data.get('api_key', '')).strip() or (self.key if base == self.config['base_url'] else '')
+        return {'models': list_models({'base_url': base, 'api_key': key})}
+
     def save(self, data):
         config = {'base_url': validate_url(str(data.get('base_url', ''))),
                   'model': str(data.get('model', '')).strip(),
@@ -156,13 +163,62 @@ def complete(config, prompt):
         {'role': 'user', 'content': prompt}])
 
 
-def complete_messages(config, messages):
-    """Multi-turn Chat Completions call used by grounded conversations."""
+MODEL_HINT = '若是模型名有误，可在设置里点“获取模型列表”选择。'
+HTTP_MESSAGES = {401: 'API Key 无效或已过期。', 402: '服务商账户余额不足，请先充值。',
+                 403: '该密钥没有访问权限。', 404: '接口地址或模型不存在。' + MODEL_HINT,
+                 429: '额度不足或请求过于频繁。',
+                 400: '接口参数不兼容，请核对模型名和输出 token 参数。' + MODEL_HINT,
+                 422: '接口参数不兼容，请核对模型名和输出 token 参数。' + MODEL_HINT,
+                 500: '服务商内部错误，请稍后重试。', 502: '服务商网关错误，请稍后重试。',
+                 503: '服务商繁忙，请稍后重试。', 504: '服务商响应超时，请稍后重试。'}
+
+
+def _call(config, path, payload=None, timeout=180):
+    """One request to the configured service; returns parsed JSON. Errors are secret-free messages."""
     base = validate_url(config['base_url'])
-    if not config['model']:
-        raise ValueError('请先填写模型名称。')
     if not config['api_key'] and urlsplit(base).hostname not in ('localhost', '127.0.0.1', '::1'):
         raise ValueError('请先在 AI 接口设置中填写 API Key。')
+    headers = {'User-Agent': 'BuddhistTextLab/0.3'}
+    if payload is not None:
+        headers['Content-Type'] = 'application/json'
+    if config['api_key']:
+        headers['Authorization'] = 'Bearer ' + config['api_key']
+    req = request.Request(base + path, None if payload is None else json.dumps(payload).encode(), headers,
+                          method='GET' if payload is None else 'POST')
+    try:
+        opener = request.build_opener(NoRedirect(), request.HTTPSHandler(context=tls_context()))
+        with opener.open(req, timeout=timeout) as response:
+            raw = response.read(4 * 1024 * 1024 + 1)
+        if len(raw) > 4 * 1024 * 1024:
+            raise ValueError('接口返回内容过大。')
+        return json.loads(raw)
+    except error.HTTPError as exc:
+        # Do not echo remote error bodies: gateways can include request credentials.
+        raise ValueError(HTTP_MESSAGES.get(exc.code, f'AI 服务返回 HTTP {exc.code}。')) from None
+    except (OSError, http.client.HTTPException) as exc:
+        # Covers URLError, timeouts, connection resets and SSL errors raised while reading.
+        raise ValueError(describe_network_error(exc)) from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise ValueError('接口未返回有效的 JSON。') from None
+
+
+def list_models(config):
+    """Model IDs the service offers to this key (OpenAI-compatible GET /models)."""
+    data = _call(config, '/models', timeout=30)
+    try:
+        items = data['data'] if isinstance(data, dict) and 'data' in data else data['models']
+        ids = sorted({m['id'] if isinstance(m, dict) else str(m) for m in items})
+    except (KeyError, TypeError):
+        raise ValueError('该服务没有提供标准的模型列表，请手动填写模型名称。') from None
+    if not ids:
+        raise ValueError('服务返回的模型列表为空，请手动填写模型名称。')
+    return ids
+
+
+def complete_messages(config, messages):
+    """Multi-turn Chat Completions call used by grounded conversations."""
+    if not config['model']:
+        raise ValueError('请先填写模型名称。')
     if not messages or any(not isinstance(m.get('content'), str) or not m['content'].strip()
                            for m in messages):
         raise ValueError('对话消息不能为空。')
@@ -170,32 +226,7 @@ def complete_messages(config, messages):
         raise ValueError('对话上下文超过 10 万字符，请新建对话并减少依据原文。')
     payload = {'model': config['model'], 'messages': messages,
                config['token_field']: config['max_tokens']}
-    headers = {'Content-Type': 'application/json', 'User-Agent': 'BuddhistTextLab/0.3'}
-    if config['api_key']:
-        headers['Authorization'] = 'Bearer ' + config['api_key']
-    req = request.Request(base + '/chat/completions', json.dumps(payload).encode(), headers, method='POST')
-    try:
-        opener = request.build_opener(NoRedirect(), request.HTTPSHandler(context=tls_context()))
-        with opener.open(req, timeout=180) as response:
-            raw = response.read(4 * 1024 * 1024 + 1)
-        if len(raw) > 4 * 1024 * 1024:
-            raise ValueError('接口返回内容过大。')
-        data = json.loads(raw)
-    except error.HTTPError as exc:
-        # Do not echo remote error bodies: gateways can include request credentials.
-        messages = {401: 'API Key 无效或已过期。', 402: '服务商账户余额不足，请先充值。',
-                    403: '该密钥没有访问权限。', 404: '接口地址或模型不存在。',
-                    429: '额度不足或请求过于频繁。',
-                    400: '接口参数不兼容，请核对模型名和输出 token 参数。',
-                    422: '接口参数不兼容，请核对模型名和输出 token 参数。',
-                    500: '服务商内部错误，请稍后重试。', 502: '服务商网关错误，请稍后重试。',
-                    503: '服务商繁忙，请稍后重试。', 504: '服务商响应超时，请稍后重试。'}
-        raise ValueError(messages.get(exc.code, f'AI 服务返回 HTTP {exc.code}。')) from None
-    except (OSError, http.client.HTTPException) as exc:
-        # Covers URLError, timeouts, connection resets and SSL errors raised while reading.
-        raise ValueError(describe_network_error(exc)) from None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise ValueError('接口未返回有效的 JSON。') from None
+    data = _call(config, '/chat/completions', payload)
     try:
         choice = data['choices'][0]
         text = choice['message']['content']

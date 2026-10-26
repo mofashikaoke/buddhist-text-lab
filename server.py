@@ -120,6 +120,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, self.notebook_action(self.path, data))
             if self.path == '/api/settings':
                 return self.respond(200, self.server.ai_settings.save(data))
+            if self.path == '/api/models':
+                return self.respond(200, self.server.ai_settings.models(data))
             if self.path == '/api/ai-test':
                 complete(self.server.ai_settings.snapshot(), '连接测试。请只回答：连接成功。')
                 return self.respond(200, {'message': '连接成功，模型已返回正文。'})

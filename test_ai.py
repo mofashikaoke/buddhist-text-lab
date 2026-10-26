@@ -19,6 +19,17 @@ from server import TOKEN, create_server
 class MockModel(BaseHTTPRequestHandler):
     received = None
 
+    def do_GET(self):
+        type(self).received = {'path': self.path, 'authorization': self.headers.get('Authorization')}
+        if self.path.startswith('/unauthorized'):
+            self.send_response(401)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({'object': 'list', 'data': [{'id': 'model-b'}, {'id': 'model-a'}]}).encode())
+
     def do_POST(self):
         type(self).received = {'payload': json.loads(self.rfile.read(int(self.headers['Content-Length']))),
                                'authorization': self.headers.get('Authorization'), 'path': self.path}
@@ -115,6 +126,26 @@ class AITests(unittest.TestCase):
             message = describe_network_error(exc)
             self.assertIn(word, message)
             self.assertNotIn('test-secret', message)
+
+    def test_model_list_uses_form_values_and_never_forwards_saved_key(self):
+        db, post, get = self.start_app({'甲书': '甲书的原文。'})
+        got = post('/api/models', {'base_url': self.base, 'api_key': ''})
+        self.assertEqual(got['models'], ['model-a', 'model-b'])
+        self.assertEqual(MockModel.received['path'], '/models')
+        self.assertEqual(MockModel.received['authorization'], 'Bearer test-secret')  # same destination: saved key
+        post('/api/models', {'base_url': self.base + '/other', 'api_key': ''})
+        self.assertIsNone(MockModel.received['authorization'])  # new destination: saved key is not sent
+        post('/api/models', {'base_url': self.base + '/other', 'api_key': 'typed-key'})
+        self.assertEqual(MockModel.received['authorization'], 'Bearer typed-key')
+        with self.assertRaises(HTTPError) as cm:
+            post('/api/models', {'base_url': self.base + '/unauthorized', 'api_key': 'x'})
+        self.assertEqual(cm.exception.code, 400)
+        self.assertEqual(get('/api/settings')['model'], 'test-model')  # nothing was saved by listing
+
+    def test_bad_model_error_points_to_the_model_list(self):
+        from ai import HTTP_MESSAGES
+        for code in (400, 404, 422):
+            self.assertIn('获取模型列表', HTTP_MESSAGES[code])
 
     def test_payment_required_is_explained(self):
         class Broke(MockModel):

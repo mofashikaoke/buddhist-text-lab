@@ -472,9 +472,30 @@ async function loadSettings() {
   $('key-status').textContent = aiConfig.has_key ? (aiConfig.key_saved ? '密钥已由 Windows 加密保存。' : '密钥仅在本次程序运行期间有效。') : '尚未填写密钥。本机无密钥服务可留空。';
 }
 ['home-settings', 'ws-settings'].forEach(id => $(id).addEventListener('click', () => $('settings-dialog').showModal()));
-$('settings-form').addEventListener('submit', run(async e => { e.preventDefault(); await api('settings', { base_url: $('api-base').value, model: $('api-model').value, api_key: $('api-key').value, max_tokens: Number($('api-tokens').value), token_field: $('api-token-field').value, remember_key: $('remember-key').checked }); $('api-key').value = ''; await loadSettings(); $('settings-dialog').close(); status('AI 设置已保存。'); }));
+async function saveSettings() {
+  await api('settings', { base_url: $('api-base').value, model: $('api-model').value, api_key: $('api-key').value, max_tokens: Number($('api-tokens').value), token_field: $('api-token-field').value, remember_key: $('remember-key').checked });
+  $('api-key').value = ''; await loadSettings();
+}
+$('settings-form').addEventListener('submit', run(async e => { e.preventDefault(); await saveSettings(); $('settings-dialog').close(); status('AI 设置已保存。'); }));
+$('fetch-models').addEventListener('click', run(async () => {
+  if (!$('api-base').value.trim()) throw new Error('请先填写 API 基础地址。');
+  const b = $('fetch-models'); b.disabled = true; status('正在向服务商查询可用模型…');
+  try {
+    const r = await api('models', { base_url: $('api-base').value, api_key: $('api-key').value });
+    $('model-list').replaceChildren(...r.models.map(m => { const o = el('option'); o.value = m; return o; }));
+    const pick = $('model-pick'); pick.replaceChildren(el('option', `选择模型（共 ${r.models.length} 个）`));
+    pick.firstChild.value = ''; r.models.forEach(m => { const o = el('option', m); o.value = m; pick.append(o); });
+    pick.hidden = false; status(`查到 ${r.models.length} 个可用模型，请在下拉框中选择。`);
+  } finally { b.disabled = false; }
+}));
+$('model-pick').addEventListener('change', e => { if (e.target.value) $('api-model').value = e.target.value; });
 $('forget-key').addEventListener('click', run(async () => { await api('settings', { ...aiConfig, clear_key: true, remember_key: false }); $('api-key').value = ''; await loadSettings(); status('密钥已清除。'); }));
-$('test-ai').addEventListener('click', run(async () => { const b = $('test-ai'); b.disabled = true; status('正在测试已保存的接口配置…'); try { const r = await api('ai-test', {}); status(r.message); } finally { b.disabled = false; } }));
+$('test-ai').addEventListener('click', run(async () => {
+  // Test what is in the form: save it first, otherwise the previous (saved) settings would be tested.
+  if (!$('settings-form').reportValidity()) return;
+  const b = $('test-ai'); b.disabled = true; status('正在保存并测试连接…');
+  try { await saveSettings(); const r = await api('ai-test', {}); status(r.message); } finally { b.disabled = false; }
+}));
 $('open-data').addEventListener('click', run(async () => { if (window.pywebview?.api) await window.pywebview.api.open_data_folder(); else status('源码模式的数据目录位于项目 data 文件夹。'); }));
 
 run(async () => { token = (await api('session')).token; await loadSettings(); await showHome(); })();
