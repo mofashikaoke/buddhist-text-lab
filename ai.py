@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import re
+import socket
 import ssl
 import threading
 from pathlib import Path
@@ -115,6 +116,35 @@ class Settings:
         return self.public()
 
 
+def tls_context():
+    """System certificates, plus the certifi bundle when available (older Windows may lack newer roots)."""
+    context = ssl.create_default_context()
+    try:
+        import certifi
+        context.load_verify_locations(certifi.where())
+    except (ImportError, OSError, ssl.SSLError):
+        pass
+    return context
+
+
+def describe_network_error(exc):
+    """A specific, secret-free reason why the AI service could not be reached."""
+    reason = getattr(exc, 'reason', exc)
+    if isinstance(reason, ssl.SSLCertVerificationError) or 'CERTIFICATE_VERIFY_FAILED' in str(reason):
+        return '证书校验失败：系统缺少所需根证书，或代理/杀毒软件拦截了 HTTPS。请更新 Windows、关闭拦截后重试。'
+    if isinstance(reason, ssl.SSLError):
+        return 'HTTPS 握手失败，可能是网络、代理或系统时间不正确导致，请稍后重试。'
+    if isinstance(reason, socket.gaierror):
+        return '无法解析接口域名（DNS 失败）。请检查网络、DNS 设置以及接口地址是否拼写正确。'
+    if isinstance(reason, (TimeoutError, socket.timeout)) or 'timed out' in str(reason):
+        return '请求超时。请检查网络或代理，较长的分析可在服务繁忙时稍后重试。'
+    if isinstance(reason, ConnectionRefusedError):
+        return '连接被拒绝。请检查接口地址、端口，以及防火墙或代理设置。'
+    if isinstance(reason, (ConnectionResetError, http.client.RemoteDisconnected)):
+        return '连接被对方中断，可能是网络或代理问题。请重试。'
+    return f'无法连接 AI 服务（{type(reason).__name__}）。请检查网络、代理及接口地址。'
+
+
 class NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise ValueError('接口发生重定向；请填写最终 API 地址后重试。')
@@ -145,7 +175,7 @@ def complete_messages(config, messages):
         headers['Authorization'] = 'Bearer ' + config['api_key']
     req = request.Request(base + '/chat/completions', json.dumps(payload).encode(), headers, method='POST')
     try:
-        opener = request.build_opener(NoRedirect(), request.HTTPSHandler(context=ssl.create_default_context()))
+        opener = request.build_opener(NoRedirect(), request.HTTPSHandler(context=tls_context()))
         with opener.open(req, timeout=180) as response:
             raw = response.read(4 * 1024 * 1024 + 1)
         if len(raw) > 4 * 1024 * 1024:
@@ -153,13 +183,17 @@ def complete_messages(config, messages):
         data = json.loads(raw)
     except error.HTTPError as exc:
         # Do not echo remote error bodies: gateways can include request credentials.
-        messages = {401: 'API Key 无效或已过期。', 403: '该密钥没有访问权限。',
-                    404: '接口地址或模型不存在。', 429: '额度不足或请求过于频繁。',
-                    400: '接口参数不兼容，请核对模型名和输出 token 参数。'}
+        messages = {401: 'API Key 无效或已过期。', 402: '服务商账户余额不足，请先充值。',
+                    403: '该密钥没有访问权限。', 404: '接口地址或模型不存在。',
+                    429: '额度不足或请求过于频繁。',
+                    400: '接口参数不兼容，请核对模型名和输出 token 参数。',
+                    422: '接口参数不兼容，请核对模型名和输出 token 参数。',
+                    500: '服务商内部错误，请稍后重试。', 502: '服务商网关错误，请稍后重试。',
+                    503: '服务商繁忙，请稍后重试。', 504: '服务商响应超时，请稍后重试。'}
         raise ValueError(messages.get(exc.code, f'AI 服务返回 HTTP {exc.code}。')) from None
-    except (OSError, http.client.HTTPException):
+    except (OSError, http.client.HTTPException) as exc:
         # Covers URLError, timeouts, connection resets and SSL errors raised while reading.
-        raise ValueError('无法连接 AI 服务或请求超时，请检查网络及接口地址。') from None
+        raise ValueError(describe_network_error(exc)) from None
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ValueError('接口未返回有效的 JSON。') from None
     try:

@@ -2,3 +2,5 @@
 pypdf>=5,<7
 # Optional traditional/simplified search.
 opencc-python-reimplemented==0.1.7
+# Extra CA bundle for HTTPS to AI services on older Windows installs.
+certifi>=2024.2.2

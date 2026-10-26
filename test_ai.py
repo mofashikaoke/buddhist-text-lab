@@ -8,7 +8,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from ai import Settings, citation_warnings, complete, protect_key, validate_url
+import socket
+import ssl
+import urllib.error
+from ai import Settings, citation_warnings, complete, describe_network_error, protect_key, validate_url
 from core import Library
 from server import TOKEN, create_server
 
@@ -100,6 +103,36 @@ class AITests(unittest.TestCase):
     def test_dropped_connection_becomes_value_error(self):
         with self.assertRaises(ValueError):
             complete({**self.config, 'base_url': self.base + '/reset'}, 'test')
+
+    def test_network_failures_name_their_cause(self):
+        cases = [(urllib.error.URLError(ssl.SSLCertVerificationError('CERTIFICATE_VERIFY_FAILED')), '证书'),
+                 (urllib.error.URLError(socket.gaierror(11001, 'getaddrinfo failed')), 'DNS'),
+                 (urllib.error.URLError(TimeoutError('timed out')), '超时'),
+                 (urllib.error.URLError(ConnectionRefusedError()), '拒绝'),
+                 (ConnectionResetError(), '中断'),
+                 (urllib.error.URLError(OSError('weird')), 'OSError')]
+        for exc, word in cases:
+            message = describe_network_error(exc)
+            self.assertIn(word, message)
+            self.assertNotIn('test-secret', message)
+
+    def test_payment_required_is_explained(self):
+        class Broke(MockModel):
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                self.send_response(402)
+                self.end_headers()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Broke)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(ValueError) as cm:
+                complete({**self.config, 'base_url': f'http://127.0.0.1:{server.server_port}'}, 'x')
+            self.assertIn('余额不足', str(cm.exception))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_settings_do_not_write_plaintext_and_destination_change_clears_key(self):
         path = Path(self.tmp.name) / 'ai-settings.json'
